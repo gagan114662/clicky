@@ -564,6 +564,7 @@ final class CompanionManager: ObservableObject {
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
     - if the user's question relates to what's on their screen, reference specific things you see.
     - if the screenshot doesn't seem relevant to their question, just answer the question directly.
+    - if the user's message includes [Clipboard contents: ...], that is text they explicitly copied. when the user says "this", "explain this", "fix this", "what does this mean", or anything referential, they almost certainly mean the clipboard text — not what's on screen. prioritize the clipboard content over the screenshot in those cases.
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
@@ -635,18 +636,21 @@ final class CompanionManager: ObservableObject {
                 let clipboardText = NSPasteboard.general.string(forType: .string)
 
                 let userPromptWithAppContext: String = {
-                    var contextLines: [String] = []
+                    var prefix: [String] = []
                     if let appName = frontmostAppName {
-                        contextLines.append("[User is currently in \(appName)]")
+                        prefix.append("[User is currently in \(appName)]")
                     }
+
+                    // Clipboard goes last in the prefix, immediately before the question,
+                    // so Claude sees it as the most relevant context for "this" references.
                     if let clipboard = clipboardText, !clipboard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         let trimmed = clipboard.trimmingCharacters(in: .whitespacesAndNewlines)
-                        // Cap at 2000 chars so huge clipboard contents don't blow up the prompt
                         let clipped = trimmed.count > 2000 ? String(trimmed.prefix(2000)) + "\n[...truncated]" : trimmed
-                        contextLines.append("[Clipboard contents:\n\(clipped)\n]")
+                        prefix.append("[Clipboard contents:\n\(clipped)\n]")
                     }
-                    if contextLines.isEmpty { return transcript }
-                    return contextLines.joined(separator: "\n") + "\n" + transcript
+
+                    if prefix.isEmpty { return transcript }
+                    return prefix.joined(separator: "\n") + "\n\nUser said: " + transcript
                 }()
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
