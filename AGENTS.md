@@ -75,6 +75,11 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
+| `MemoryManager.swift` | ~291 | Persistent memory across sessions. Writes facts to `~/.clicky/memory.md` + `user.md`, persists last 20 exchanges to `history.json`. Background Claude extraction after each turn via ClaudeCodeCLIClient. |
+| `AgentSession.swift` | ~40 | Data model for a single Codex agent task. Holds task description, triangle color (from a 6-color palette), status (running/completed/failed), and result. |
+| `AgentSessionManager.swift` | ~70 | Manages multiple concurrent Codex agent sessions (the "siblings"). Cycles through triangle colors, runs each agent in a background Task, publishes session state changes, auto-removes completed sessions after 8s. |
+| `AgentSiblingsOverlayWindow.swift` | ~180 | Floating NSPanel showing "mini clicky siblings" — one dark rounded square icon per agent, with colored triangle + status dot. Non-activating, stays on all Spaces. Shows/hides based on active sessions. |
+| `CodexCLIClient.swift` | ~239 | Codex CLI client for agent tasks. Primary trigger phrase: "clicky agent". Runs `codex exec --json` subprocess, parses JSONL events. Uses `~/.local/bin/codex-clicky` (v0.124.0). |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
 ## Build & Run

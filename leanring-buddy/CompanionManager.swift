@@ -83,12 +83,28 @@ final class CompanionManager: ObservableObject {
         }
     }()
 
+    /// Codex CLI client for agent tasks ("build me a website", "create a spreadsheet", etc.)
+    /// Uses the bundled Codex runtime from /Applications/Clicky.app with the user's Codex subscription.
+    private let codexCLIClient = CodexCLIClient()
+
+    /// Tracks all running and recently completed Codex agent sessions (the "siblings").
+    let agentSessionManager = AgentSessionManager()
+
+    /// Owns the floating siblings overlay window that shows mini sibling icons.
+    private let agentSiblingsWindowManager = AgentSiblingsWindowManager()
+
+    /// Manages persistent memory across sessions: ~/.clicky/memory.md, user.md, history.json.
+    private let memoryManager = MemoryManager()
+
+    /// Memory context block injected into every system prompt. Loaded at startup from disk.
+    private var memoryCacheSystemPromptBlock: String = ""
+
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient()
     }()
 
     /// Conversation history so Claude remembers prior exchanges within a session.
-    /// Each entry is the user's transcript and Claude's response.
+    /// Seeded from history.json on startup so sessions resume across app restarts.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
 
     /// The currently running AI response task, if any. Cancelled when the user
@@ -186,6 +202,24 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+
+        // Load persistent memory and seed conversation history from previous sessions
+        let sessionContext = memoryManager.loadSessionContext()
+        memoryCacheSystemPromptBlock = sessionContext.systemPromptBlock
+        // Seed with up to the last 5 exchanges so the session resumes naturally
+        conversationHistory = sessionContext.seedHistory.suffix(5).map { $0 }
+        print("🧠 Codex CLI available: \(CodexCLIClient.isAvailable())")
+
+        // Save memory when the app quits — runs end-of-session summarization
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.memoryManager.onSessionEnd(fullSessionHistory: self.conversationHistory)
+        }
+
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -554,6 +588,12 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Companion Prompt
 
+    /// Builds the system prompt, prepending the memory context block so Clicky
+    /// remembers facts and preferences from previous sessions.
+    private var companionVoiceResponseSystemPromptWithMemory: String {
+        memoryCacheSystemPromptBlock + Self.companionVoiceResponseSystemPrompt
+    }
+
     private static let companionVoiceResponseSystemPrompt = """
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
@@ -612,6 +652,47 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
+                // Route to Codex agent for task-oriented requests (build, create, browse, etc.)
+                // Spawns a sibling session so the voice UI returns to idle immediately
+                // and the user can talk while agents run in parallel.
+                if CodexCLIClient.isAgentTask(transcript) && CodexCLIClient.isAvailable() {
+                    let screenshotsForCodex = screenCaptures.map { (data: $0.imageData, label: $0.label) }
+                    let memoryBlock = memoryCacheSystemPromptBlock
+
+                    // Show the siblings overlay so the user can see the agent running.
+                    agentSiblingsWindowManager.show(sessionManager: agentSessionManager)
+
+                    // Acknowledge the agent task verbally, then go idle so the user
+                    // can keep talking while the agent works in the background.
+                    voiceState = .idle
+                    speakWithMacOSVoice("On it.")
+                    scheduleTransientHideIfNeeded()
+
+                    // Launch the agent — runs entirely in the background.
+                    agentSessionManager.launchAgent(
+                        prompt: transcript,
+                        screenshots: screenshotsForCodex,
+                        memoryContextBlock: memoryBlock,
+                        codexClient: codexCLIClient
+                    ) { [weak self] agentResult in
+                        guard let self else { return }
+                        let trimmedResult = agentResult.trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.conversationHistory.append((userTranscript: transcript, assistantResponse: trimmedResult))
+                        if self.conversationHistory.count > 10 {
+                            self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
+                        }
+                        self.memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: trimmedResult)
+                        if !trimmedResult.isEmpty {
+                            self.speakWithMacOSVoice("Done. \(trimmedResult)")
+                        }
+                        // Hide siblings overlay once all agents are finished.
+                        if !self.agentSessionManager.hasAnySessions {
+                            self.agentSiblingsWindowManager.hide()
+                        }
+                    }
+                    return
+                }
+
                 // Build image labels with the actual screenshot pixel dimensions
                 // so Claude's coordinate space matches the image it sees. We
                 // scale from screenshot pixels to display points ourselves.
@@ -637,7 +718,7 @@ final class CompanionManager: ObservableObject {
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    systemPrompt: companionVoiceResponseSystemPromptWithMemory,
                     conversationHistory: historyForAPI,
                     userPrompt: userPromptWithAppContext,
                     onTextChunk: { _ in
@@ -717,6 +798,9 @@ final class CompanionManager: ObservableObject {
                 if conversationHistory.count > 10 {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
                 }
+
+                // Persist exchange to disk and extract any memorable facts in the background
+                memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: spokenText)
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
