@@ -81,12 +81,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     /// that when a developer hits Cmd+R in Xcode, the fresh build takes
     /// over instead of being silently ignored in favor of the stale login
     /// item copy.
+    /// All known Clicky bundle identifiers — catches both the Xcode dev build
+    /// and FarzaTV's packaged release so neither can run alongside ours.
+    private static let allClickyBundleIdentifiers = [
+        "com.yourcompany.leanring-buddy",
+        "com.humansongs.clicky",
+    ]
+
     private func terminateOtherRunningInstancesOfClicky() {
         guard let ownBundleIdentifier = Bundle.main.bundleIdentifier else { return }
         let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
 
-        let otherInstancesOfClicky = NSRunningApplication
-            .runningApplications(withBundleIdentifier: ownBundleIdentifier)
+        let otherInstancesOfClicky = Self.allClickyBundleIdentifiers
+            .flatMap { bundleID in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) }
             .filter { runningApplication in
                 runningApplication.processIdentifier != ownProcessIdentifier
             }
@@ -111,8 +118,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // and the first push-to-talk after launch still double-fires.
         let maxWaitUntilOthersExit = Date().addingTimeInterval(1.5)
         while Date() < maxWaitUntilOthersExit {
-            let stillRunning = NSRunningApplication
-                .runningApplications(withBundleIdentifier: ownBundleIdentifier)
+            let stillRunning = Self.allClickyBundleIdentifiers
+                .flatMap { bundleID in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) }
                 .contains { runningApplication in
                     runningApplication.processIdentifier != ownProcessIdentifier
                 }
@@ -123,8 +130,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Force-kill any stragglers that still haven't exited.
-        let stragglers = NSRunningApplication
-            .runningApplications(withBundleIdentifier: ownBundleIdentifier)
+        let stragglers = Self.allClickyBundleIdentifiers
+            .flatMap { bundleID in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) }
             .filter { runningApplication in
                 runningApplication.processIdentifier != ownProcessIdentifier
             }

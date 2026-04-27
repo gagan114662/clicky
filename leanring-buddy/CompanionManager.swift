@@ -625,11 +625,21 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
+                // Capture which app the user is currently working in so Claude
+                // can give more targeted help without needing to infer it from the screenshot.
+                let frontmostAppName = NSWorkspace.shared.frontmostApplication?.localizedName
+                let userPromptWithAppContext: String = {
+                    if let appName = frontmostAppName {
+                        return "[User is currently in \(appName)]\n\(transcript)"
+                    }
+                    return transcript
+                }()
+
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionVoiceResponseSystemPrompt,
                     conversationHistory: historyForAPI,
-                    userPrompt: transcript,
+                    userPrompt: userPromptWithAppContext,
                     onTextChunk: { _ in
                         // No streaming text display — spinner stays until TTS plays
                     }
