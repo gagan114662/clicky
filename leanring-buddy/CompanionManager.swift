@@ -628,11 +628,25 @@ final class CompanionManager: ObservableObject {
                 // Capture which app the user is currently working in so Claude
                 // can give more targeted help without needing to infer it from the screenshot.
                 let frontmostAppName = NSWorkspace.shared.frontmostApplication?.localizedName
+
+                // Read clipboard text so the user can say "explain this" or "fix this"
+                // without having to describe what they copied. Only include plain text —
+                // ignore images, files, or other clipboard types that don't add context.
+                let clipboardText = NSPasteboard.general.string(forType: .string)
+
                 let userPromptWithAppContext: String = {
+                    var contextLines: [String] = []
                     if let appName = frontmostAppName {
-                        return "[User is currently in \(appName)]\n\(transcript)"
+                        contextLines.append("[User is currently in \(appName)]")
                     }
-                    return transcript
+                    if let clipboard = clipboardText, !clipboard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let trimmed = clipboard.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Cap at 2000 chars so huge clipboard contents don't blow up the prompt
+                        let clipped = trimmed.count > 2000 ? String(trimmed.prefix(2000)) + "\n[...truncated]" : trimmed
+                        contextLines.append("[Clipboard contents:\n\(clipped)\n]")
+                    }
+                    if contextLines.isEmpty { return transcript }
+                    return contextLines.joined(separator: "\n") + "\n" + transcript
                 }()
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
