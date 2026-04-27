@@ -12,10 +12,29 @@
 
 const http = require("http");
 const https = require("https");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
+
+function getClipboardText() {
+  try {
+    return execSync("pbpaste", { timeout: 500, encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
+}
+
+function getFrontmostAppName() {
+  try {
+    return execSync(
+      `osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'`,
+      { timeout: 500, encoding: "utf8" }
+    ).trim();
+  } catch {
+    return "";
+  }
+}
 
 const PORT = 57328; // avoid 8787 which may be in use
 
@@ -111,9 +130,32 @@ async function handleMessages(req, res) {
     ];
   }
 
+  // Inject clipboard and frontmost app as context blocks so Claude knows
+  // what the user has copied and which app they're in without them having
+  // to say it. Clipboard goes immediately before the user's question so
+  // "this" / "explain this" / "fix this" refers to the copied text, not the screen.
+  const clipboardText = getClipboardText();
+  const frontmostApp = getFrontmostAppName();
+  const contextBlocks = [];
+  if (frontmostApp) {
+    contextBlocks.push({ type: "text", text: `[User is currently in ${frontmostApp}]` });
+  }
+  if (clipboardText) {
+    const clipped = clipboardText.length > 2000
+      ? clipboardText.slice(0, 2000) + "\n[...truncated]"
+      : clipboardText;
+    contextBlocks.push({ type: "text", text: `[Clipboard contents:\n${clipped}\n]\nWhen the user says "this", "explain this", "fix this", or anything referential, they mean the clipboard text above — not what's on screen.` });
+  }
+  if (contextBlocks.length > 0) {
+    console.log(`  clipboard: ${clipboardText ? clipboardText.slice(0, 60).replace(/\n/g, " ") + "…" : "(empty)"}`);
+    console.log(`  app: ${frontmostApp || "(unknown)"}`);
+  }
+
+  const enrichedContentBlocks = [...contextBlocks, ...contentBlocks];
+
   const inputEvent = JSON.stringify({
     type: "user",
-    message: { role: "user", content: contentBlocks },
+    message: { role: "user", content: enrichedContentBlocks },
   });
 
   const args = [
