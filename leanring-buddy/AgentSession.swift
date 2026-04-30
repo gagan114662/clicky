@@ -22,6 +22,13 @@ struct AgentSession: Identifiable {
     let triangleColor: Color
     var status: AgentSessionStatus
     var result: String?
+    /// Live streaming output from Codex while the agent runs. Updated as
+    /// codex emits text deltas. Shown in the detail panel when the user
+    /// clicks the sibling icon.
+    var liveOutput: String
+    /// Codex thread ID captured from the `thread.started` event. Required
+    /// so the user can send follow-up messages via `codex exec resume`.
+    var codexThreadID: String?
     let startedAt: Date
 
     // Cycles through these colors as new agents are spawned so each sibling
@@ -40,6 +47,8 @@ struct AgentSession: Identifiable {
         self.taskDescription = taskDescription
         self.triangleColor = triangleColor
         self.status = .running
+        self.liveOutput = ""
+        self.codexThreadID = nil
         self.startedAt = Date()
     }
 }

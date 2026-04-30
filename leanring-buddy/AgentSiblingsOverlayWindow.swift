@@ -20,7 +20,11 @@ import SwiftUI
 final class AgentSiblingsOverlayWindow: NSPanel {
     private var hostingController: NSHostingController<AgentSiblingsContainerView>?
 
-    init(sessionManager: AgentSessionManager) {
+    init(
+        sessionManager: AgentSessionManager,
+        onSelectSession: @escaping (UUID) -> Void,
+        onSessionsEmpty: @escaping () -> Void
+    ) {
         // Start with a compact frame — SwiftUI content drives the actual size.
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 90, height: 90),
@@ -38,7 +42,11 @@ final class AgentSiblingsOverlayWindow: NSPanel {
         ignoresMouseEvents = false  // siblings are interactive (click to dismiss)
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
-        let rootView = AgentSiblingsContainerView(sessionManager: sessionManager)
+        let rootView = AgentSiblingsContainerView(
+            sessionManager: sessionManager,
+            onSelectSession: onSelectSession,
+            onSessionsEmpty: onSessionsEmpty
+        )
         let hc = NSHostingController(rootView: rootView)
         hostingController = hc
         contentView = hc.view
@@ -68,11 +76,35 @@ final class AgentSiblingsOverlayWindow: NSPanel {
 final class AgentSiblingsWindowManager {
     private var window: AgentSiblingsOverlayWindow?
 
-    func show(sessionManager: AgentSessionManager) {
+    /// Shows the siblings overlay. `onSelectSession` is called with the
+    /// session id and the overlay window's screen frame whenever the user
+    /// taps a sibling icon — CompanionManager uses this to position the
+    /// click-to-inspect detail panel next to the column of icons.
+    func show(
+        sessionManager: AgentSessionManager,
+        onSelectSession: @escaping (UUID, NSRect) -> Void
+    ) {
         if window == nil {
-            window = AgentSiblingsOverlayWindow(sessionManager: sessionManager)
+            // Wrap the (UUID) callback so it includes the live overlay frame
+            // at click time, used by the detail window for anchoring.
+            let wrappedSelect: (UUID) -> Void = { [weak self] sessionID in
+                guard let frame = self?.window?.frame else {
+                    onSelectSession(sessionID, .zero)
+                    return
+                }
+                onSelectSession(sessionID, frame)
+            }
+            window = AgentSiblingsOverlayWindow(
+                sessionManager: sessionManager,
+                onSelectSession: wrappedSelect,
+                onSessionsEmpty: { [weak self] in self?.hide() }
+            )
+            print("🪟 Created AgentSiblingsOverlayWindow")
         }
         window?.orderFront(nil)
+        if let frame = window?.frame {
+            print("🪟 Sibling overlay shown at frame: \(frame), visible: \(window?.isVisible ?? false), screen: \(window?.screen?.localizedName ?? "nil")")
+        }
     }
 
     func hide() {
@@ -84,13 +116,17 @@ final class AgentSiblingsWindowManager {
 
 struct AgentSiblingsContainerView: View {
     @ObservedObject var sessionManager: AgentSessionManager
+    let onSelectSession: (UUID) -> Void
+    let onSessionsEmpty: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
             ForEach(sessionManager.sessions) { session in
-                AgentSiblingIconView(session: session) {
-                    sessionManager.removeSession(id: session.id)
-                }
+                AgentSiblingIconView(
+                    session: session,
+                    onSelect: { onSelectSession(session.id) },
+                    onDismiss: { sessionManager.removeSession(id: session.id) }
+                )
                 .transition(.asymmetric(
                     insertion: .scale(scale: 0.6).combined(with: .opacity),
                     removal: .scale(scale: 0.6).combined(with: .opacity)
@@ -99,6 +135,16 @@ struct AgentSiblingsContainerView: View {
         }
         .padding(8)
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: sessionManager.sessions.map { $0.id })
+        .onAppear {
+            if sessionManager.sessions.isEmpty {
+                onSessionsEmpty()
+            }
+        }
+        .onChange(of: sessionManager.sessions.count) { count in
+            if count == 0 {
+                onSessionsEmpty()
+            }
+        }
     }
 }
 
@@ -106,6 +152,7 @@ struct AgentSiblingsContainerView: View {
 
 struct AgentSiblingIconView: View {
     let session: AgentSession
+    let onSelect: () -> Void
     let onDismiss: () -> Void
 
     @State private var isHovered = false
@@ -154,8 +201,16 @@ struct AgentSiblingIconView: View {
             withAnimation(.easeInOut(duration: 0.15)) { isHovered = hovering }
         }
         .onTapGesture {
-            // Tap to dismiss completed/failed sessions; ignore taps on running ones.
-            if session.status != .running { onDismiss() }
+            // Single click — open the detail panel for ANY session (running,
+            // completed, or failed). Long-press on completed sessions removes
+            // them early; otherwise they auto-fade after the linger window.
+            onSelect()
+        }
+        .onLongPressGesture(minimumDuration: 0.6) {
+            // Long-press dismisses ANY session (running, done, or failed).
+            // For running sessions this also interrupts the codex turn so
+            // the agent stops doing work in the background.
+            onDismiss()
         }
         .help(session.taskDescription)
     }

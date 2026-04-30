@@ -164,30 +164,51 @@ final class MemoryManager {
         let existingMemory = readFile(at: Self.memoryFileURL)
         let existingUserProfile = readFile(at: Self.userProfileFileURL)
 
-        let systemPrompt = "You extract durable facts from conversations for persistent memory. Reply only with valid JSON — no markdown fences, no prose, no explanation."
+        let systemPrompt = "You extract durable facts from conversations for persistent memory. Write facts the way a friend would jot a quick note about someone — short, plain, specific. Reply only with valid JSON, no markdown, no prose."
 
         let prompt = """
-        Extract any NEW durable facts from this conversation exchange worth remembering in future sessions.
+        Look at this exchange and pull out any NEW durable facts worth remembering next session.
 
         Exchange:
         User: \(userTranscript)
         Clicky: \(assistantResponse)
 
-        Current memory.md (do NOT repeat these):
+        Already in memory.md (skip these):
         \(existingMemory.isEmpty ? "(empty)" : existingMemory)
 
-        Current user.md (do NOT repeat these):
+        Already in user.md (skip these):
         \(existingUserProfile.isEmpty ? "(empty)" : existingUserProfile)
 
-        Rules:
-        - Only extract facts that are durable across sessions (projects, preferences, identity)
-        - Never extract one-off questions, small talk, or session-specific details
-        - Never repeat anything already in the current files above
-        - memory.md: current projects, apps, tools, work context, stated preferences
-        - user.md: user's name, role, location, personality, long-term habits
-        - If nothing new: return {}
+        Voice & style — facts must read like a friend's quick note:
+        - Short sentences, plain words. No corporate language. No "the user".
+        - Be specific. "Loves espresso" beats "consumes coffee beverages".
+        - One idea per fact. Don't pile clauses.
+        - Skip obvious or generic stuff ("uses a computer").
+        - NEVER paste raw file paths, screenshot/PNG names, JSON, tool names,
+          terminal output, log fragments, UUIDs, or session-specific details.
+          If something only makes sense in this exact session, skip it.
+        - Translate tech artifacts into a human observation. Example:
+          screenshot "/var/.../IMG_4422.png" → "Was looking at his photo library."
+          NOT "User opened IMG_4422.png".
+        - If nothing new is worth remembering: return {}
 
-        Return ONLY valid JSON, no markdown fences, no prose:
+        Examples of GOOD facts:
+        - "Building Clicky — a Mac menu-bar AI app."
+        - "Prefers Sonnet 4.6 over Opus."
+        - "Hates being asked clarifying questions before work starts."
+        - "Lives in NYC, lifts at Equinox before work."
+
+        Examples of BAD facts (too literal / robotic / session-specific):
+        - "User builds web applications using HTML/JavaScript and strongly prefers standalone solutions that open directly in browser without server requirements"
+        - "User has expressed interest in productivity tooling"
+        - "User opened /Users/gagan/Desktop/screenshot.png to discuss UI"
+        - "User invoked agent task with prompt 'build me a snake game'"
+
+        What goes where:
+        - memory.md: current projects, tools they use, stated preferences, work context
+        - user.md: name, role, location, personality, long-term habits
+
+        Return ONLY valid JSON:
         {"memory": ["fact1"], "user": ["fact1"]}
         """
 
@@ -217,26 +238,38 @@ final class MemoryManager {
         }.joined(separator: "\n\n")
 
         let prompt = """
-        Review this full conversation session and extract any NEW durable facts not already captured.
+        Skim this full session and pull out any NEW durable facts not already captured.
 
         Full session:
         \(historyText)
 
-        Current memory.md:
+        Already in memory.md (skip these):
         \(existingMemory.isEmpty ? "(empty)" : existingMemory)
 
-        Current user.md:
+        Already in user.md (skip these):
         \(existingUserProfile.isEmpty ? "(empty)" : existingUserProfile)
 
-        Return ONLY valid JSON — no prose, no markdown:
+        Voice & style — write like a friend's quick note:
+        - Short sentences. Plain words. No "the user".
+        - Be specific. "Loves espresso" beats "consumes coffee beverages".
+        - One idea per fact.
+        - Skip obvious / generic stuff.
+        - NEVER paste file paths, PNG names, JSON, tool names, terminal output,
+          UUIDs, or session-specific details. Translate tech artifacts into
+          a plain human observation, or skip them.
+        - If nothing new: return {}
+
+        memory.md: projects, tools, preferences, work context
+        user.md: name, role, location, personality, long-term habits
+
+        Return ONLY valid JSON:
         {"memory": ["fact1"], "user": ["fact1"]}
-        If nothing new: {}
         """
 
         do {
             let (json, _) = try await extractionClient.analyzeImageStreaming(
                 images: [],
-                systemPrompt: "You extract durable facts from conversations for persistent memory. Reply only with valid JSON.",
+                systemPrompt: "You extract durable facts from conversations for persistent memory. Write like a friend's quick note — short, plain, specific. Reply only with valid JSON.",
                 conversationHistory: [],
                 userPrompt: prompt,
                 onTextChunk: { _ in }

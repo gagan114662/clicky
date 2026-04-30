@@ -17,14 +17,30 @@ struct AssemblyAIStreamingTranscriptionProviderError: LocalizedError {
 }
 
 final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider {
-    /// AssemblyAI token endpoint — fetched directly using the API key.
-    private static let assemblyAITokenURL = "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480"
+    private static let directAssemblyAITokenURL = URL(
+        string: "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480"
+    )!
+    private static let tokenProxyConfigKeys = [
+        "ClickyAssemblyAITokenProxyURL",
+        "AssemblyAITokenProxyURL"
+    ]
+    private static let tokenProxyEnvironmentKey = "CLICKY_ASSEMBLYAI_TOKEN_PROXY_URL"
+
+    private static var directAPIKey: String {
+        DirectAPICredentials.assemblyAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     let displayName = "AssemblyAI"
     let requiresSpeechRecognitionPermission = false
 
-    var isConfigured: Bool { true }
-    var unavailableExplanation: String? { nil }
+    var isConfigured: Bool {
+        Self.configuredTokenProxyURL() != nil || !Self.directAPIKey.isEmpty
+    }
+    var unavailableExplanation: String? {
+        isConfigured
+            ? nil
+            : "AssemblyAI is not configured. Add an AssemblyAI API key or ClickyAssemblyAITokenProxyURL."
+    }
 
     /// Single long-lived URLSession shared across all streaming sessions.
     /// Creating and invalidating a URLSession per session corrupts the OS
@@ -38,7 +54,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) async throws -> any BuddyStreamingTranscriptionSession {
-        // Fetch a fresh temporary token from the proxy before each session
+        // Fetch a fresh temporary token before each session.
         let temporaryToken = try await fetchTemporaryToken()
         print("🎙️ AssemblyAI: fetched temporary token (\(temporaryToken.prefix(20))...)")
 
@@ -56,14 +72,38 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         return session
     }
 
-    /// Calls AssemblyAI directly to get a short-lived streaming token.
+    /// Fetches a short-lived AssemblyAI streaming token. Production can use a
+    /// configured Worker proxy; local development can opt into a proxy with
+    /// `CLICKY_ASSEMBLYAI_TOKEN_PROXY_URL`. Otherwise we call AssemblyAI
+    /// directly with the local direct API credential.
     private func fetchTemporaryToken() async throws -> String {
-        var request = URLRequest(url: URL(string: Self.assemblyAITokenURL)!)
+        if let proxyURL = Self.configuredTokenProxyURL() {
+            return try await fetchTemporaryTokenFromProxy(proxyURL)
+        }
+
+        let apiKey = Self.directAPIKey
+        guard !apiKey.isEmpty else {
+            throw AssemblyAIStreamingTranscriptionProviderError(
+                message: "AssemblyAI is not configured. Add an API key or ClickyAssemblyAITokenProxyURL."
+            )
+        }
+
+        var request = URLRequest(url: Self.directAssemblyAITokenURL)
         request.httpMethod = "GET"
-        request.setValue(DirectAPICredentials.assemblyAIAPIKey, forHTTPHeaderField: "Authorization")
+        request.setValue(apiKey, forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return try decodeTemporaryTokenResponse(data: data, response: response)
+    }
+
+    private func fetchTemporaryTokenFromProxy(_ proxyURL: URL) async throws -> String {
+        var request = URLRequest(url: proxyURL)
+        request.httpMethod = "POST"
 
         let (data, response) = try await URLSession.shared.data(for: request)
+        return try decodeTemporaryTokenResponse(data: data, response: response)
+    }
 
+    private func decodeTemporaryTokenResponse(data: Data, response: URLResponse) throws -> String {
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
@@ -76,11 +116,27 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let token = json["token"] as? String else {
             throw AssemblyAIStreamingTranscriptionProviderError(
-                message: "Invalid token response from proxy."
+                message: "Invalid AssemblyAI token response."
             )
         }
 
         return token
+    }
+
+    private static func configuredTokenProxyURL() -> URL? {
+        for key in tokenProxyConfigKeys {
+            if let urlString = AppBundleConfiguration.stringValue(forKey: key),
+               let url = URL(string: urlString) {
+                return url
+            }
+        }
+        if let urlString = ProcessInfo.processInfo.environment[tokenProxyEnvironmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !urlString.isEmpty,
+           let url = URL(string: urlString) {
+            return url
+        }
+        return nil
     }
 }
 

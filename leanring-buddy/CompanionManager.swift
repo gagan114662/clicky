@@ -73,15 +73,30 @@ final class CompanionManager: ObservableObject {
 
     private lazy var claudeAPI: any AnthropicChatClient = {
         // Use the claude CLI subprocess so no separate Anthropic API key is needed.
-        // Falls back to the Cloudflare Worker proxy if the CLI binary is not found.
         if ClaudeCodeCLIClient.isAvailable() {
             print("✅ Using Claude Code CLI subprocess for responses")
             return ClaudeCodeCLIClient(model: selectedModel)
-        } else {
-            print("⚠️ Claude Code CLI not found — falling back to Worker proxy at localhost:8787")
-            return ClaudeAPI(authMode: .proxyURL("http://localhost:8787/chat"), model: selectedModel)
         }
+
+        if let proxyURL = Self.configuredClaudeProxyURL() {
+            print("⚠️ Claude Code CLI not found — using configured Worker proxy")
+            return ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel)
+        }
+
+        print("⚠️ Claude Code CLI not found and no Worker proxy configured — using Claude Code OAuth direct API")
+        return ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel)
     }()
+
+    private static func configuredClaudeProxyURL() -> String? {
+        for key in ["ClickyClaudeProxyURL", "ClaudeProxyURL"] {
+            if let urlString = AppBundleConfiguration.stringValue(forKey: key) {
+                return urlString
+            }
+        }
+        let urlString = ProcessInfo.processInfo.environment["CLICKY_CLAUDE_PROXY_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return urlString?.isEmpty == false ? urlString : nil
+    }
 
     /// Codex CLI client for agent tasks ("build me a website", "create a spreadsheet", etc.)
     /// Uses the bundled Codex runtime from /Applications/Clicky.app with the user's Codex subscription.
@@ -92,6 +107,10 @@ final class CompanionManager: ObservableObject {
 
     /// Owns the floating siblings overlay window that shows mini sibling icons.
     private let agentSiblingsWindowManager = AgentSiblingsWindowManager()
+
+    /// Owns the click-to-inspect detail panel that opens when the user taps
+    /// a sibling icon. Renders the session's live Codex output.
+    private let agentSessionDetailWindowManager = AgentSessionDetailWindowManager()
 
     /// Manages persistent memory across sessions: ~/.clicky/memory.md, user.md, history.json.
     private let memoryManager = MemoryManager()
@@ -210,7 +229,22 @@ final class CompanionManager: ObservableObject {
         conversationHistory = sessionContext.seedHistory.suffix(5).map { $0 }
         print("🧠 Codex CLI available: \(CodexCLIClient.isAvailable())")
 
-        // Save memory when the app quits — runs end-of-session summarization
+        // Wire the detail panel's "Send" button to actually send a follow-up
+        // message to the corresponding codex session.
+        agentSessionDetailWindowManager.onSendFollowUp = { [weak self] sessionID, prompt in
+            guard let self else { return }
+            print("🔁 Detail panel follow-up requested for session \(sessionID): \(prompt.prefix(80))")
+            self.agentSessionManager.sendFollowUp(
+                sessionID: sessionID,
+                prompt: prompt,
+                codexClient: self.codexCLIClient
+            )
+        }
+
+        // Save memory when the app quits — runs end-of-session summarization.
+        // ALSO synchronously kill the codex app-server process tree; without
+        // this, every Clicky restart leaks the codex subprocess, which keeps
+        // running indefinitely and consuming the user's quota.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
@@ -218,6 +252,7 @@ final class CompanionManager: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             self.memoryManager.onSessionEnd(fullSessionHistory: self.conversationHistory)
+            CodexAppServerClient.shared.shutdownSync()
         }
 
         // Eagerly touch the Claude API so its TLS warmup handshake completes
@@ -655,39 +690,83 @@ final class CompanionManager: ObservableObject {
                 // Route to Codex agent for task-oriented requests (build, create, browse, etc.)
                 // Spawns a sibling session so the voice UI returns to idle immediately
                 // and the user can talk while agents run in parallel.
-                if CodexCLIClient.isAgentTask(transcript) && CodexCLIClient.isAvailable() {
-                    let screenshotsForCodex = screenCaptures.map { (data: $0.imageData, label: $0.label) }
+                let isAgent = CodexCLIClient.isAgentTask(transcript)
+                let codexAvailable = CodexCLIClient.isAvailable()
+                print("🎙️ Transcript received: \"\(transcript)\"")
+                print("🤖 isAgentTask: \(isAgent), Codex available: \(codexAvailable)")
+                if isAgent && codexAvailable {
+                    // PRIVACY: do NOT pass screenshots to Codex agents.
+                    // Codex agent tasks (build apps, research, etc.) don't
+                    // need to see the user's screen. Passing the screenshot
+                    // would leak whatever's currently visible — open emails,
+                    // browser tabs, desktop files — to the agent process.
+                    let screenshotsForCodex: [(data: Data, label: String)] = []
                     let memoryBlock = memoryCacheSystemPromptBlock
 
-                    // Show the siblings overlay so the user can see the agent running.
-                    agentSiblingsWindowManager.show(sessionManager: agentSessionManager)
+                    // If the user asked for multiple parallel sessions ("spawn two
+                    // sessions, one for X and one for Y"), decompose into N tasks.
+                    // Tries fast regex first; if that returns 1 task but the user
+                    // clearly asked for multiple, falls back to Haiku for reliable
+                    // splitting across any natural-language phrasing (~2-3s).
+                    let parallelTasks = await CodexCLIClient.decomposeTaskIntoParallelTasksWithLLMFallback(transcript)
+                    print("🤖 Decomposed into \(parallelTasks.count) parallel task(s):")
+                    for (taskIndex, task) in parallelTasks.enumerated() {
+                        print("   #\(taskIndex + 1): \(task)")
+                    }
 
-                    // Acknowledge the agent task verbally, then go idle so the user
-                    // can keep talking while the agent works in the background.
+                    // Show the siblings overlay. The onSelectSession callback
+                    // fires when a sibling icon is tapped — open the detail
+                    // panel anchored to the overlay column at that moment.
+                    agentSiblingsWindowManager.show(
+                        sessionManager: agentSessionManager,
+                        onSelectSession: { [weak self] sessionID, overlayFrame in
+                            guard let self else { return }
+                            self.agentSessionDetailWindowManager.show(
+                                sessionID: sessionID,
+                                sessionManager: self.agentSessionManager,
+                                anchoredTo: overlayFrame
+                            )
+                        }
+                    )
+
+                    // Acknowledge verbally, then go idle so the user can keep talking
+                    // while agents work in the background.
                     voiceState = .idle
-                    speakWithMacOSVoice("On it.")
+                    let acknowledgment = parallelTasks.count > 1
+                        ? "On it. Spawning \(parallelTasks.count) agents."
+                        : "On it."
+                    speakWithMacOSVoice(acknowledgment)
                     scheduleTransientHideIfNeeded()
 
-                    // Launch the agent — runs entirely in the background.
-                    agentSessionManager.launchAgent(
-                        prompt: transcript,
-                        screenshots: screenshotsForCodex,
-                        memoryContextBlock: memoryBlock,
-                        codexClient: codexCLIClient
-                    ) { [weak self] agentResult in
-                        guard let self else { return }
-                        let trimmedResult = agentResult.trimmingCharacters(in: .whitespacesAndNewlines)
-                        self.conversationHistory.append((userTranscript: transcript, assistantResponse: trimmedResult))
-                        if self.conversationHistory.count > 10 {
-                            self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
-                        }
-                        self.memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: trimmedResult)
-                        if !trimmedResult.isEmpty {
-                            self.speakWithMacOSVoice("Done. \(trimmedResult)")
-                        }
-                        // Hide siblings overlay once all agents are finished.
-                        if !self.agentSessionManager.hasAnySessions {
-                            self.agentSiblingsWindowManager.hide()
+                    // Launch one sibling per task — they all run in parallel.
+                    for (taskIndex, individualTask) in parallelTasks.enumerated() {
+                        let isMultiTask = parallelTasks.count > 1
+                        agentSessionManager.launchAgent(
+                            prompt: individualTask,
+                            screenshots: screenshotsForCodex,
+                            memoryContextBlock: memoryBlock,
+                            codexClient: codexCLIClient
+                        ) { [weak self] agentResult in
+                            guard let self else { return }
+                            let trimmedResult = agentResult.trimmingCharacters(in: .whitespacesAndNewlines)
+                            self.conversationHistory.append((userTranscript: individualTask, assistantResponse: trimmedResult))
+                            if self.conversationHistory.count > 10 {
+                                self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
+                            }
+                            self.memoryManager.onTurnCompleted(userTranscript: individualTask, assistantResponse: trimmedResult)
+                            // Speak only a short confirmation — NOT the full codex
+                            // output, which can be thousands of characters and
+                            // take minutes to read aloud. The user can click the
+                            // sibling icon to see the full result.
+                            let confirmation = isMultiTask
+                                ? "Task \(taskIndex + 1) ready."
+                                : "Done."
+                            self.speakWithMacOSVoice(confirmation)
+                            // Hide siblings overlay only once ALL agents have finished.
+                            if !self.agentSessionManager.hasAnySessions {
+                                self.agentSiblingsWindowManager.hide()
+                                self.agentSessionDetailWindowManager.hide()
+                            }
                         }
                     }
                     return
