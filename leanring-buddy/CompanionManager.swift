@@ -74,26 +74,38 @@ final class CompanionManager: ObservableObject {
     private lazy var claudeAPI: any AnthropicChatClient = {
         if let zaiClient = ZAIChatClient.configuredIfEnabled(selectedModel: selectedModel) {
             FileLogger.log("✅ Using Z.ai direct API for responses")
-            return zaiClient
+            return RetryingChatClient(zaiClient, providerName: "Z.ai")
         }
 
         if let proxyURL = Self.configuredClaudeProxyURL() {
             FileLogger.log("✅ Using Claude API Worker proxy for responses")
-            return ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel)
+            return RetryingChatClient(
+                ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel),
+                providerName: "Claude proxy"
+            )
         }
 
         if ClaudeCodeOAuthProvider.isAvailable() {
             FileLogger.log("✅ Using Claude Code OAuth direct API for responses")
-            return ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel)
+            return RetryingChatClient(
+                ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel),
+                providerName: "Claude OAuth"
+            )
         }
 
         if ClaudeCodeCLIClient.isAvailable() {
             FileLogger.log("⚠️ Claude API credentials unavailable — using Claude Code CLI subprocess fallback")
-            return ClaudeCodeCLIClient(model: selectedModel)
+            return RetryingChatClient(
+                ClaudeCodeCLIClient(model: selectedModel),
+                providerName: "Claude CLI"
+            )
         }
 
         FileLogger.log("⚠️ No Claude API proxy, OAuth token, or CLI found — using Claude Code OAuth direct API and surfacing auth errors")
-        return ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel)
+        return RetryingChatClient(
+            ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel),
+            providerName: "Claude OAuth"
+        )
     }()
 
     private static func configuredClaudeProxyURL() -> String? {
