@@ -17,9 +17,6 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
 
-      - name: Create credentials file
-        run: cp leanring-buddy/DirectAPICredentials.swift.example leanring-buddy/DirectAPICredentials.swift
-
       - name: Import signing certificate
         env:
           CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -43,14 +40,19 @@ jobs:
           restore-keys: ${{ runner.os }}-spm-
 
       - name: Archive
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
         run: |
           set -o pipefail
           xcodebuild archive \
             -project leanring-buddy.xcodeproj \
             -scheme leanring-buddy \
             -configuration Release \
-            -archivePath $RUNNER_TEMP/Clicky.xcarchive \
+            -archivePath $RUNNER_TEMP/ipop-ai.xcarchive \
             DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
+            PRODUCT_BUNDLE_IDENTIFIER=ai.ipop.mac \
+            PRODUCT_NAME="ipop.ai" \
+            SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
             | xcpretty
 
       - name: Export app
@@ -70,7 +72,7 @@ jobs:
           </plist>
           EOF
           xcodebuild -exportArchive \
-            -archivePath $RUNNER_TEMP/Clicky.xcarchive \
+            -archivePath $RUNNER_TEMP/ipop-ai.xcarchive \
             -exportPath $RUNNER_TEMP/export \
             -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
             | xcpretty
@@ -81,8 +83,8 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          APP_PATH=$RUNNER_TEMP/export/Clicky.app
-          ZIP_PATH=$RUNNER_TEMP/Clicky-notarize.zip
+          APP_PATH=$RUNNER_TEMP/export/ipop.ai.app
+          ZIP_PATH=$RUNNER_TEMP/ipop-ai-notarize.zip
           ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
           xcrun notarytool submit "$ZIP_PATH" \
             --apple-id "$APPLE_ID" \
@@ -95,18 +97,31 @@ jobs:
         run: |
           brew install create-dmg
           create-dmg \
-            --volname "Clicky" \
+            --volname "ipop.ai" \
             --window-size 600 400 \
             --icon-size 128 \
-            --icon "Clicky.app" 150 185 \
+            --icon "ipop.ai.app" 150 185 \
             --app-drop-link 450 185 \
-            --hide-extension "Clicky.app" \
-            $RUNNER_TEMP/Clicky-${{ github.ref_name }}.dmg \
+            --hide-extension "ipop.ai.app" \
+            $RUNNER_TEMP/ipop-ai-beta.dmg \
             $RUNNER_TEMP/export/
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "$RUNNER_TEMP/ipop-ai-beta.dmg" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$RUNNER_TEMP/ipop-ai-beta.dmg"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Clicky ${{ github.ref_name }}
-          files: ${{ runner.temp }}/Clicky-${{ github.ref_name }}.dmg
+          name: ipop.ai ${{ github.ref_name }}
+          files: ${{ runner.temp }}/ipop-ai-beta.dmg
           generate_release_notes: true

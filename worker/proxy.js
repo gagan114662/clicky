@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Local Anthropic API proxy — routes Claude calls through the `claude` CLI
- * so the packaged Clicky app works with a Claude Code subscription.
+ * so the packaged ipop.ai app works with a Claude Code subscription.
  *
  * Endpoints mirrored:
  *   POST /v1/messages          → claude CLI subprocess (streaming SSE)
@@ -323,7 +323,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`\n✅ Clicky proxy running at http://localhost:${PORT}`);
+  console.log(`\n✅ ipop.ai proxy running at http://localhost:${PORT}`);
   console.log(`   claude binary: ${findClaude()}`);
   console.log(`   Intercepts:    /v1/messages → claude CLI`);
   console.log(`                  /tts → ElevenLabs`);

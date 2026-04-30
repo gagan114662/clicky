@@ -1,4 +1,4 @@
-# Clicky - Agent Instructions
+# ipop.ai - Agent Instructions
 
 <!-- This is the single source of truth for all AI coding agents. CLAUDE.md is a symlink to this file. -->
 <!-- AGENTS.md spec: https://github.com/agentsmd/agents.md — supported by Claude Code, Cursor, Copilot, Gemini CLI, and others. -->
@@ -21,7 +21,7 @@ API keys should live on a Cloudflare Worker proxy or local development-only cred
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
-- **Analytics**: PostHog via `ClickyAnalytics.swift`
+- **Analytics**: local no-op hooks in `ipop.aiAnalytics.swift`
 
 ### API Proxy (Cloudflare Worker)
 
@@ -46,7 +46,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
 
-**Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
+**Transient Cursor Mode**: When "Show cursor" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
 ## Key Files
 
@@ -72,13 +72,13 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
-| `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
+| `ipop.aiAnalytics.swift` | ~121 | Local no-op analytics hooks; no production analytics are sent. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `MemoryManager.swift` | ~291 | Persistent memory across sessions. Writes facts to `~/.clicky/memory.md` + `user.md`, persists last 20 exchanges to `history.json`. Background Claude extraction after each turn via ClaudeCodeCLIClient. |
+| `MemoryManager.swift` | ~291 | Persistent memory across sessions. Writes facts to `~/.ipop-ai/memory.md` + `user.md`, persists last 20 exchanges to `history.json`. Background Claude extraction after each turn via ClaudeCodeCLIClient. |
 | `AgentSession.swift` | ~50 | Data model for a single Codex agent task. Holds task description, triangle color (from a 6-color palette), status (running/completed/failed), result, live output, and Codex thread ID. |
 | `AgentSessionManager.swift` | ~300 | Manages multiple concurrent Codex agent sessions (the "siblings") on the shared `codex app-server`. Publishes live output, supports follow-ups, interrupts running turns, archives closed threads, and keeps completed sessions inspectable before cleanup. |
-| `AgentSiblingsOverlayWindow.swift` | ~250 | Floating NSPanel showing "mini clicky siblings" — one dark rounded square icon per agent, with colored triangle + status dot. Non-activating, stays on all Spaces. Click opens session details; long-press dismisses/stops a session. |
+| `AgentSiblingsOverlayWindow.swift` | ~250 | Floating NSPanel showing "mini ipop.ai siblings" — one dark rounded square icon per agent, with colored triangle + status dot. Non-activating, stays on all Spaces. Click opens session details; long-press dismisses/stops a session. |
 | `AgentSessionDetailWindow.swift` | ~260 | Click-to-inspect floating panel for a Codex sibling. Shows task status, live streamed output, and follow-up composer. |
 | `CodexAppServerClient.swift` | ~600 | Long-lived JSON-RPC client for `codex app-server`. Starts threads, streams events, interrupts turns, archives threads, and kills the server process tree on app exit or parent-process disappearance. |
 | `CodexCLIClient.swift` | ~760 | Legacy/fallback Codex CLI client and transcript classifier for agent tasks. Parses JSONL, captures stderr, closes stdin to avoid hangs, supports parallel task decomposition and follow-up execution. |

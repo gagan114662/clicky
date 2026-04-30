@@ -38,14 +38,14 @@ struct leanring_buddyTests {
     }
 
     @Test func enumeratedSessionFollowUpRoutesToCodexAgents() async throws {
-        let transcript = "Mission 1: Find people who might be interested in Clikki. And session 2, um, find me a list of YC startups doing something similar to Clicky."
+        let transcript = "Mission 1: Find people who might be interested in ipop.ai. And session 2, um, find me a list of YC startups doing something similar to ipop.ai."
 
         #expect(CodexCLIClient.isAgentTask(transcript))
 
         let tasks = CodexCLIClient.decomposeTaskIntoParallelTasks(transcript)
         #expect(tasks.count == 2)
-        #expect(tasks[0] == "Find people who might be interested in Clikki")
-        #expect(tasks[1] == "find me a list of YC startups doing something similar to Clicky")
+        #expect(tasks[0] == "Find people who might be interested in ipop.ai")
+        #expect(tasks[1] == "find me a list of YC startups doing something similar to ipop.ai")
     }
 
     @Test func explicitTwoCodexSessionsCreatesTwoDemoTasks() async throws {
