@@ -193,11 +193,7 @@ class ClaudeAPI: AnthropicChatClient {
         let (byteStream, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"]
-            )
+            throw ProviderPipelineError.invalidResponse(provider: "Claude")
         }
 
         // If non-2xx status, read the full body as error text
@@ -207,10 +203,11 @@ class ClaudeAPI: AnthropicChatClient {
                 errorBodyChunks.append(line)
             }
             let errorBody = errorBodyChunks.joined(separator: "\n")
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: httpResponse.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "API Error (\(httpResponse.statusCode)): \(errorBody)"]
+            throw ProviderPipelineError.apiError(
+                provider: "Claude",
+                statusCode: httpResponse.statusCode,
+                retryAfterSeconds: Self.retryAfterSeconds(from: httpResponse),
+                body: errorBody
             )
         }
 
@@ -242,6 +239,10 @@ class ClaudeAPI: AnthropicChatClient {
                 let currentAccumulatedText = accumulatedResponseText
                 await onTextChunk(currentAccumulatedText)
             }
+        }
+
+        guard !accumulatedResponseText.isEmpty else {
+            throw ProviderPipelineError.emptyResponse(provider: "Claude")
         }
 
         let duration = Date().timeIntervalSince(startTime)
@@ -301,13 +302,17 @@ class ClaudeAPI: AnthropicChatClient {
 
         let (data, response) = try await session.data(for: request)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ProviderPipelineError.invalidResponse(provider: "Claude")
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
             let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
+            throw ProviderPipelineError.apiError(
+                provider: "Claude",
+                statusCode: httpResponse.statusCode,
+                retryAfterSeconds: Self.retryAfterSeconds(from: httpResponse),
+                body: responseString
             )
         }
 
@@ -315,14 +320,29 @@ class ClaudeAPI: AnthropicChatClient {
         guard let content = json?["content"] as? [[String: Any]],
               let textBlock = content.first(where: { ($0["type"] as? String) == "text" }),
               let text = textBlock["text"] as? String else {
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid response format"]
-            )
+            throw ProviderPipelineError.invalidResponse(provider: "Claude")
         }
 
         let duration = Date().timeIntervalSince(startTime)
         return (text: text, duration: duration)
+    }
+
+    private static func retryAfterSeconds(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        if let seconds = TimeInterval(value) {
+            return seconds
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        guard let retryDate = formatter.date(from: value) else { return nil }
+        return max(0, retryDate.timeIntervalSinceNow)
     }
 }

@@ -92,6 +92,43 @@ struct leanring_buddyTests {
         )
     }
 
+    @Test func retryPolicyRetriesRateLimitsTimeoutsAndParseFailures() async throws {
+        let rateLimitDecision = ChatProviderRetryPolicy.decision(
+            for: ProviderPipelineError.apiError(
+                provider: "Z.ai",
+                statusCode: 429,
+                retryAfterSeconds: 0.25,
+                body: "rate limited"
+            ),
+            attempt: 1
+        )
+        #expect(rateLimitDecision?.reason == "rate limited")
+        #expect(rateLimitDecision?.delaySeconds == 0.25)
+
+        let timeoutDecision = ChatProviderRetryPolicy.decision(
+            for: URLError(.timedOut),
+            attempt: 1
+        )
+        #expect(timeoutDecision?.reason == "network timeout/interruption")
+
+        let parseDecision = ChatProviderRetryPolicy.decision(
+            for: ProviderPipelineError.invalidResponse(provider: "Z.ai"),
+            attempt: 1
+        )
+        #expect(parseDecision?.reason == "provider response parse failure")
+
+        let authDecision = ChatProviderRetryPolicy.decision(
+            for: ProviderPipelineError.apiError(
+                provider: "Z.ai",
+                statusCode: 401,
+                retryAfterSeconds: nil,
+                body: "bad key"
+            ),
+            attempt: 1
+        )
+        #expect(authDecision == nil)
+    }
+
     @Test func localIntentCleansCutOffAppLaunchSpeech() async throws {
         let intent = LocalIntentRouter.route(transcript: "Can you open up Google for me and—")
 

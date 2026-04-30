@@ -135,7 +135,7 @@ final class ZAIChatClient: AnthropicChatClient {
 
         let (byteStream, response) = try await session.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw ZAIChatClientError.invalidResponse
+            throw ProviderPipelineError.invalidResponse(provider: "Z.ai")
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
@@ -143,8 +143,10 @@ final class ZAIChatClient: AnthropicChatClient {
             for try await line in byteStream.lines {
                 errorLines.append(line)
             }
-            throw ZAIChatClientError.apiError(
+            throw ProviderPipelineError.apiError(
+                provider: "Z.ai",
                 statusCode: httpResponse.statusCode,
+                retryAfterSeconds: Self.retryAfterSeconds(from: httpResponse),
                 body: errorLines.joined(separator: "\n")
             )
         }
@@ -170,7 +172,7 @@ final class ZAIChatClient: AnthropicChatClient {
         }
 
         guard !accumulatedResponseText.isEmpty else {
-            throw ZAIChatClientError.emptyResponse
+            throw ProviderPipelineError.emptyResponse(provider: "Z.ai")
         }
 
         return (text: accumulatedResponseText, duration: Date().timeIntervalSince(startTime))
@@ -254,6 +256,25 @@ final class ZAIChatClient: AnthropicChatClient {
             return "image/png"
         }
         return "image/jpeg"
+    }
+
+    private static func retryAfterSeconds(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        if let seconds = TimeInterval(value) {
+            return seconds
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        guard let retryDate = formatter.date(from: value) else { return nil }
+        return max(0, retryDate.timeIntervalSinceNow)
     }
 
     private static func runtimeString(
