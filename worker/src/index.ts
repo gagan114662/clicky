@@ -1,5 +1,5 @@
 /**
- * Clicky Proxy Worker — Z.ai + OpenRouter backend
+ * ipop.ai Proxy Worker — Z.ai + OpenRouter backend
  *
  * Accepts Anthropic-format requests from the Swift app and proxies them to
  * Z.ai Codeplan (GLM 5.1) as primary, with OpenRouter as fallback.
@@ -184,8 +184,8 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
           headers: {
             "Authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://clicky.local",
-            "X-Title": "Clicky",
+            "HTTP-Referer": "https://ipop.ai",
+            "X-Title": "ipop.ai",
           },
           body: JSON.stringify(openaiBody),
         }

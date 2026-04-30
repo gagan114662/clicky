@@ -2,7 +2,7 @@
 //  ClaudeCodeOAuthProvider.swift
 //  leanring-buddy
 //
-//  Reads the Claude Code OAuth token from the macOS Keychain so Clicky can
+//  Reads the Claude Code OAuth token from the macOS Keychain so ipop.ai can
 //  call the Anthropic API directly without needing a separate API key.
 //  Claude Code stores its credentials under the "Claude Code-credentials"
 //  keychain service after the user runs `claude login`.

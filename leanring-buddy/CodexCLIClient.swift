@@ -2,7 +2,7 @@
 //  CodexCLIClient.swift
 //  leanring-buddy
 //
-//  Runs the Codex CLI (OpenAI's agent runtime, bundled inside /Applications/Clicky.app)
+//  Runs the Codex CLI (OpenAI's agent runtime, bundled inside /Applications/ipop.ai.app)
 //  as a subprocess for agent tasks: "build me a website", "create a spreadsheet", etc.
 //  Uses the user's existing Codex subscription — no API key required.
 //
@@ -21,7 +21,7 @@ enum CodexCLIError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .binaryNotFound:
-            return "Codex CLI not found. Make sure /Applications/Clicky.app is installed."
+            return "Codex CLI not found. Make sure /Applications/ipop.ai.app is installed."
         case .processLaunchFailed(let underlying):
             return "Failed to launch Codex CLI: \(underlying.localizedDescription)"
         case .noResponseReceived:
@@ -199,11 +199,11 @@ private final class CodexCLIStreamState: @unchecked Sendable {
     }
 }
 
-/// Runs agent tasks using the Codex CLI bundled in /Applications/Clicky.app.
+/// Runs agent tasks using the Codex CLI bundled in /Applications/ipop.ai.app.
 /// Uses the Codex subscription stored at ~/.codex/auth.json — no API key needed.
 final class CodexCLIClient {
     /// Saved copy of the newer Codex binary (v0.124.0, supports gpt-5.5 subscription mode).
-    private static let savedCodexBinaryPath = "\(NSHomeDirectory())/.local/bin/codex-clicky"
+    private static let savedCodexBinaryPath = "\(NSHomeDirectory())/.local/bin/codex-ipop"
     private static let homebrewCodexBinaryPath = "/opt/homebrew/bin/codex"
 
     static func findBinaryPath() -> String? {
@@ -224,11 +224,11 @@ final class CodexCLIClient {
 
     /// Returns true if the transcript looks like an agent task that Codex should handle.
     ///
-    /// Detection is lenient because AssemblyAI sometimes mishears "Clicky" as
-    /// "Learning Buddy" / "leaning buddy" / "clicker" / etc. Rules:
+    /// Detection is lenient because dictation sometimes mishears "ipop" or
+    /// "Codex" as nearby words. Rules:
     ///   1. If the wake word "agent" appears in the first 6 words of the transcript,
-    ///      it's an agent task (covers "Clicky agent ...", "Learning Buddy agent ...",
-    ///      "Hey Clicky, agent build me ...", etc.).
+    ///      it's an agent task (covers "ipop agent ...", "Learning Buddy agent ...",
+    ///      "Hey ipop, agent build me ...", etc.).
     ///   2. Explicit "codex ..." invocations always route to the agent.
     ///   3. Strong autonomous-action prefixes ("build me a ...", "create a ...", etc.)
     ///      route to the agent.
@@ -530,16 +530,16 @@ final class CodexCLIClient {
 
         Rules:
         - Return ONLY the actions each agent should perform, in plain English.
-        - Strip filler ("uh", "um", "you know"), wake words ("hey clicky", "agent"), meta instructions ("spawn two agents", "make sure they're separate sessions").
+        - Strip filler ("uh", "um", "you know"), wake words ("hey ipop", "agent"), meta instructions ("spawn two agents", "make sure they're separate sessions").
         - Each task is a standalone, complete instruction.
         - If the transcript actually only contains one task, return it as-is.
 
         Examples:
-        Input: "spawn two agents, one to research market for Clicky, and the other one is to make a landing page"
-        Output: {"tasks": ["research market for Clicky", "make a landing page"]}
+        Input: "spawn two agents, one to research market for ipop.ai, and the other one is to make a landing page"
+        Output: {"tasks": ["research market for ipop.ai", "make a landing page"]}
 
-        Input: "Start 2 Codex sessions, one to research the prospects for a product like Clicky. And the other one is to make a simple landing page."
-        Output: {"tasks": ["research prospects for a product like Clicky", "make a simple landing page"]}
+        Input: "Start 2 Codex sessions, one to research the prospects for a product like ipop.ai. And the other one is to make a simple landing page."
+        Output: {"tasks": ["research prospects for a product like ipop.ai", "make a simple landing page"]}
 
         Input: "agent, build me a snake game"
         Output: {"tasks": ["build me a snake game"]}
@@ -613,7 +613,7 @@ final class CodexCLIClient {
 
         for (index, screenshot) in screenshots.enumerated() {
             let tempPath = tempDir
-                .appendingPathComponent("clicky_codex_screen_\(index)_\(UUID().uuidString).jpg")
+                .appendingPathComponent("ipop_codex_screen_\(index)_\(UUID().uuidString).jpg")
                 .path
             try screenshot.data.write(to: URL(fileURLWithPath: tempPath))
             screenshotFilePaths.append(tempPath)
@@ -637,11 +637,11 @@ final class CodexCLIClient {
         for screenshotPath in screenshotFilePaths {
             arguments += ["-i", screenshotPath]
         }
-        // PRIVACY: Default workspace is ~/Desktop/clicky-agents (not ~/Desktop
+        // PRIVACY: Default workspace is ~/Desktop/ipop-ai-agents (not ~/Desktop
         // itself) so Codex's workspace-write sandbox can't list or read the
         // rest of the user's Desktop. Created files land in a clearly-labelled
         // subfolder the user can find and clean up.
-        let defaultWorkspace = "\(NSHomeDirectory())/Desktop/clicky-agents"
+        let defaultWorkspace = "\(NSHomeDirectory())/Desktop/ipop-ai-agents"
         let workspace = workingDirectory ?? defaultWorkspace
         try? FileManager.default.createDirectory(
             atPath: workspace,
@@ -744,7 +744,7 @@ final class CodexCLIClient {
         process.executableURL = URL(fileURLWithPath: binaryPath)
 
         var arguments = ["exec", "--json", "--skip-git-repo-check", "--full-auto", "resume", threadID]
-        let defaultWorkspace = "\(NSHomeDirectory())/Desktop/clicky-agents"
+        let defaultWorkspace = "\(NSHomeDirectory())/Desktop/ipop-ai-agents"
         let workspace = workingDirectory ?? defaultWorkspace
         try? FileManager.default.createDirectory(
             atPath: workspace,

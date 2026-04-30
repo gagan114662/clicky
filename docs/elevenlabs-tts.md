@@ -6,29 +6,29 @@ ElevenLabs key is present, it falls back to the built-in macOS `say` voice.
 ## Enable Locally
 
 ```sh
-defaults write com.yourcompany.leanring-buddy ClickyElevenLabsAPIKey '<your-elevenlabs-api-key>'
+defaults write ai.ipop.mac ElevenLabsAPIKey '<your-elevenlabs-api-key>'
 ```
 
 Optional voice/model overrides:
 
 ```sh
-defaults write com.yourcompany.leanring-buddy ClickyElevenLabsVoiceID '21m00Tcm4TlvDq8ikWAM'
-defaults write com.yourcompany.leanring-buddy ClickyElevenLabsModelID 'eleven_flash_v2_5'
+defaults write ai.ipop.mac ElevenLabsVoiceID '21m00Tcm4TlvDq8ikWAM'
+defaults write ai.ipop.mac ElevenLabsModelID 'eleven_flash_v2_5'
 ```
 
 ## Environment Overrides
 
 ```sh
-CLICKY_ELEVENLABS_API_KEY='<your-elevenlabs-api-key>' \
-CLICKY_ELEVENLABS_VOICE_ID='21m00Tcm4TlvDq8ikWAM' \
-open /path/to/Clicky.app
+IPOP_ELEVENLABS_API_KEY='<your-elevenlabs-api-key>' \
+IPOP_ELEVENLABS_VOICE_ID='21m00Tcm4TlvDq8ikWAM' \
+open /Applications/ipop.ai.app
 ```
 
 Supported env vars:
 
-- `CLICKY_ELEVENLABS_API_KEY`
-- `CLICKY_ELEVENLABS_VOICE_ID`
-- `CLICKY_ELEVENLABS_MODEL_ID`
+- `IPOP_ELEVENLABS_API_KEY`
+- `IPOP_ELEVENLABS_VOICE_ID`
+- `IPOP_ELEVENLABS_MODEL_ID`
 
 ## Fallback
 

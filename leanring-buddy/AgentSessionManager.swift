@@ -27,7 +27,7 @@ final class AgentSessionManager: ObservableObject {
     // Long-press the icon to dismiss earlier.
     private static let completedSessionLingerSeconds: Double = 600
 
-    private static let workspaceRoot = "\(NSHomeDirectory())/Desktop/clicky-agents"
+    private static let workspaceRoot = "\(NSHomeDirectory())/Desktop/ipop-ai-agents"
 
     // MARK: - Launch
 

@@ -10,7 +10,6 @@
 import AVFoundation
 import Combine
 import Foundation
-import PostHog
 import ScreenCaptureKit
 import SwiftUI
 
@@ -112,18 +111,19 @@ final class CompanionManager: ObservableObject {
     }()
 
     private static func configuredClaudeProxyURL() -> String? {
-        for key in ["ClickyClaudeProxyURL", "ClaudeProxyURL"] {
+        for key in ["ClaudeProxyURL"] {
             if let urlString = AppBundleConfiguration.stringValue(forKey: key) {
                 return urlString
             }
         }
-        let urlString = ProcessInfo.processInfo.environment["CLICKY_CLAUDE_PROXY_URL"]?
+        let environment = ProcessInfo.processInfo.environment
+        let urlString = (environment["IPOP_CLAUDE_PROXY_URL"] ?? environment["CLAUDE_PROXY_URL"])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return urlString?.isEmpty == false ? urlString : nil
     }
 
     /// Codex CLI client for agent tasks ("build me a website", "create a spreadsheet", etc.)
-    /// Uses the bundled Codex runtime from /Applications/Clicky.app with the user's Codex subscription.
+    /// Uses the Codex runtime with the user's local Codex subscription.
     private let codexCLIClient = CodexCLIClient()
 
     /// Tracks all running and recently completed Codex agent sessions (the "siblings").
@@ -136,7 +136,7 @@ final class CompanionManager: ObservableObject {
     /// a sibling icon. Renders the session's live Codex output.
     private let agentSessionDetailWindowManager = AgentSessionDetailWindowManager()
 
-    /// Manages persistent memory across sessions: ~/.clicky/memory.md, user.md, history.json.
+    /// Manages persistent memory across sessions: ~/.ipop-ai/memory.md, user.md, history.json.
     private let memoryManager = MemoryManager()
 
     /// Memory context block injected into every system prompt. Loaded at startup from disk.
@@ -200,16 +200,16 @@ final class CompanionManager: ObservableObject {
         return storedModel
     }
 
-    /// User preference for whether the Clicky cursor should be shown.
+    /// User preference for whether the cursor should be shown.
     /// When toggled off, the overlay is hidden and push-to-talk is disabled.
     /// Persisted to UserDefaults so the choice survives app restarts.
-    @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
+    @Published var isIpopCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isIpopCursorEnabled") == nil
         ? true
-        : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
+        : UserDefaults.standard.bool(forKey: "isIpopCursorEnabled")
 
-    func setClickyCursorEnabled(_ enabled: Bool) {
-        isClickyCursorEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
+    func setIpopCursorEnabled(_ enabled: Bool) {
+        isIpopCursorEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isIpopCursorEnabled")
         transientHideTask?.cancel()
         transientHideTask = nil
 
@@ -233,32 +233,19 @@ final class CompanionManager: ObservableObject {
     /// Whether the user has submitted their email during onboarding.
     @Published var hasSubmittedEmail: Bool = UserDefaults.standard.bool(forKey: "hasSubmittedEmail")
 
-    /// Submits the user's email to FormSpark and identifies them in PostHog.
+    /// Records that the user dismissed the optional email step.
+    /// Production beta builds do not transmit email addresses from the app.
     func submitEmail(_ email: String) {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedEmail.isEmpty else { return }
 
         hasSubmittedEmail = true
         UserDefaults.standard.set(true, forKey: "hasSubmittedEmail")
-
-        // Identify user in PostHog
-        PostHogSDK.shared.identify(trimmedEmail, userProperties: [
-            "email": trimmedEmail
-        ])
-
-        // Submit to FormSpark
-        Task {
-            var request = URLRequest(url: URL(string: "https://submit-form.com/RWbGJxmIs")!)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["email": trimmedEmail])
-            _ = try? await URLSession.shared.data(for: request)
-        }
     }
 
     func start() {
         refreshAllPermissions()
-        print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        print("🔑 ipop.ai start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
         bindAudioPowerLevel()
@@ -285,7 +272,7 @@ final class CompanionManager: ObservableObject {
 
         // Save memory when the app quits — runs end-of-session summarization.
         // ALSO synchronously kill the codex app-server process tree; without
-        // this, every Clicky restart leaks the codex subprocess, which keeps
+        // this, every app restart leaks the codex subprocess, which keeps
         // running indefinitely and consuming the user's quota.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -305,7 +292,7 @@ final class CompanionManager: ObservableObject {
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
         // panel will show the permissions UI instead.
-        if hasCompletedOnboarding && allPermissionsGranted && isClickyCursorEnabled {
+        if hasCompletedOnboarding && allPermissionsGranted && isIpopCursorEnabled {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
@@ -318,13 +305,13 @@ final class CompanionManager: ObservableObject {
     /// the overlay so the welcome animation and intro video play.
     func triggerOnboarding() {
         // Post notification so the panel manager can dismiss the panel
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+        NotificationCenter.default.post(name: .ipopDismissPanel, object: nil)
 
         // Mark onboarding as completed so the Start button won't appear
         // again on future launches — the cursor will auto-show instead
         hasCompletedOnboarding = true
 
-        ClickyAnalytics.trackOnboardingStarted()
+        IpopAnalytics.trackOnboardingStarted()
 
         // Play Besaid theme at 60% volume, fade out after 1m 30s
         startOnboardingMusic()
@@ -339,8 +326,8 @@ final class CompanionManager: ObservableObject {
     /// footer link. Same flow as triggerOnboarding but the cursor overlay
     /// is already visible so we just restart the welcome animation and video.
     func replayOnboarding() {
-        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-        ClickyAnalytics.trackOnboardingReplayed()
+        NotificationCenter.default.post(name: .ipopDismissPanel, object: nil)
+        IpopAnalytics.trackOnboardingReplayed()
         startOnboardingMusic()
         // Tear down any existing overlays and recreate with isFirstAppearance = true
         overlayWindowManager.hasShownOverlayBefore = false
@@ -358,7 +345,7 @@ final class CompanionManager: ObservableObject {
     private func startOnboardingMusic() {
         stopOnboardingMusic()
         guard let musicURL = Bundle.main.url(forResource: "ff", withExtension: "mp3") else {
-            print("⚠️ Clicky: ff.mp3 not found in bundle")
+            print("⚠️ ipop.ai: ff.mp3 not found in bundle")
             return
         }
 
@@ -373,7 +360,7 @@ final class CompanionManager: ObservableObject {
                 self?.fadeOutOnboardingMusic()
             }
         } catch {
-            print("⚠️ Clicky: Failed to play onboarding music: \(error)")
+            print("⚠️ ipop.ai: Failed to play onboarding music: \(error)")
         }
     }
 
@@ -449,13 +436,13 @@ final class CompanionManager: ObservableObject {
 
         // Track individual permission grants as they happen
         if !previouslyHadAccessibility && hasAccessibilityPermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "accessibility")
+            IpopAnalytics.trackPermissionGranted(permission: "accessibility")
         }
         if !previouslyHadScreenRecording && hasScreenRecordingPermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "screen_recording")
+            IpopAnalytics.trackPermissionGranted(permission: "screen_recording")
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
-            ClickyAnalytics.trackPermissionGranted(permission: "microphone")
+            IpopAnalytics.trackPermissionGranted(permission: "microphone")
         }
         // Screen content permission is persisted — once the user has approved the
         // SCShareableContent picker, we don't need to re-check it.
@@ -464,7 +451,7 @@ final class CompanionManager: ObservableObject {
         }
 
         if !previouslyHadAll && allPermissionsGranted {
-            ClickyAnalytics.trackAllPermissionsGranted()
+            IpopAnalytics.trackAllPermissionsGranted()
         }
     }
 
@@ -497,10 +484,10 @@ final class CompanionManager: ObservableObject {
                     guard didCapture else { return }
                     hasScreenContentPermission = true
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
-                    ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
+                    IpopAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     // If onboarding was already completed, show the cursor overlay now
-                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
+                    if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isIpopCursorEnabled {
                         overlayWindowManager.hasShownOverlayBefore = true
                         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
                         isOverlayVisible = true
@@ -600,14 +587,14 @@ final class CompanionManager: ObservableObject {
             transientHideTask = nil
 
             // If the cursor is hidden, bring it back transiently for this interaction
-            if !isClickyCursorEnabled && !isOverlayVisible {
+            if !isIpopCursorEnabled && !isOverlayVisible {
                 overlayWindowManager.hasShownOverlayBefore = true
                 overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
                 isOverlayVisible = true
             }
 
             // Dismiss the menu bar panel so it doesn't cover the screen
-            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            NotificationCenter.default.post(name: .ipopDismissPanel, object: nil)
 
             // Cancel any in-progress response and TTS from a previous utterance.
             // We also terminate the /usr/bin/say process immediately so the old
@@ -634,7 +621,7 @@ final class CompanionManager: ObservableObject {
             }
     
 
-            ClickyAnalytics.trackPushToTalkStarted()
+            IpopAnalytics.trackPushToTalkStarted()
 
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = Task {
@@ -646,7 +633,7 @@ final class CompanionManager: ObservableObject {
                     submitDraftText: { [weak self] finalTranscript in
                         self?.lastTranscript = finalTranscript
                         FileLogger.log("🗣️ Companion received transcript: \(finalTranscript)")
-                        ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+                        IpopAnalytics.trackUserMessageSent(transcript: finalTranscript)
                         self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                     }
                 )
@@ -656,7 +643,7 @@ final class CompanionManager: ObservableObject {
             // before the async startPushToTalk had a chance to begin recording.
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
-            ClickyAnalytics.trackPushToTalkReleased()
+            IpopAnalytics.trackPushToTalkReleased()
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
@@ -667,7 +654,7 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Companion Prompt
 
-    /// Builds the system prompt, prepending the memory context block so Clicky
+    /// Builds the system prompt, prepending the memory context block so ipop.ai
     /// remembers facts and preferences from previous sessions.
     private var companionVoiceResponseSystemPromptWithMemory: String {
         memoryCacheSystemPromptBlock + Self.companionVoiceResponseSystemPrompt
@@ -681,7 +668,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're ipop.ai, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
@@ -1040,7 +1027,7 @@ final class CompanionManager: ObservableObject {
 
                     detectedElementScreenLocation = globalLocation
                     detectedElementDisplayFrame = displayFrame
-                    ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
+                    IpopAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
                     print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
                 } else {
                     print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
@@ -1063,7 +1050,7 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
-                ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+                IpopAnalytics.trackAIResponseReceived(response: spokenText)
 
                 // Prefer ElevenLabs when configured; fall back to macOS say so
                 // a missing key never blocks the interaction.
@@ -1074,7 +1061,7 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
-                ClickyAnalytics.trackResponseError(error: error.localizedDescription)
+                IpopAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
                 speakCreditsErrorFallback()
             }
@@ -1086,12 +1073,12 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// If the cursor is in transient mode (user toggled "Show Clicky" off),
+    /// If the cursor is in transient mode (user toggled "Show cursor" off),
     /// waits for TTS playback and any pointing animation to finish, then
     /// fades out the overlay after a 1-second pause. Cancelled automatically
     /// if the user starts another push-to-talk interaction.
     private func scheduleTransientHideIfNeeded() {
-        guard !isClickyCursorEnabled && isOverlayVisible else { return }
+        guard !isIpopCursorEnabled && isOverlayVisible else { return }
 
         transientHideTask?.cancel()
         transientHideTask = Task {
@@ -1162,7 +1149,7 @@ final class CompanionManager: ObservableObject {
                 // User interrupted playback.
             } catch {
                 guard !Task.isCancelled else { return }
-                ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+                IpopAnalytics.trackTTSError(error: error.localizedDescription)
                 FileLogger.log("⚠️ ElevenLabs TTS failed: \(error.localizedDescription) — using macOS fallback")
                 self.speakWithMacOSVoice(trimmedText)
                 self.elevenLabsSpeechTask = nil
@@ -1185,17 +1172,17 @@ final class CompanionManager: ObservableObject {
 
     private static func configuredMacOSVoiceName() -> String {
         runtimeString(
-            defaultsKeys: ["ClickyMacOSVoiceName", "MacOSVoiceName"],
-            infoKeys: ["ClickyMacOSVoiceName", "MacOSVoiceName"],
-            environmentKeys: ["CLICKY_MACOS_VOICE_NAME", "MACOS_VOICE_NAME"]
+            defaultsKeys: ["MacOSVoiceName"],
+            infoKeys: ["MacOSVoiceName"],
+            environmentKeys: ["IPOP_MACOS_VOICE_NAME", "MACOS_VOICE_NAME"]
         ) ?? defaultMacOSVoiceName
     }
 
     private static func configuredMacOSVoiceRate() -> Int {
         guard let rateString = runtimeString(
-            defaultsKeys: ["ClickyMacOSVoiceRate", "MacOSVoiceRate"],
-            infoKeys: ["ClickyMacOSVoiceRate", "MacOSVoiceRate"],
-            environmentKeys: ["CLICKY_MACOS_VOICE_RATE", "MACOS_VOICE_RATE"]
+            defaultsKeys: ["MacOSVoiceRate"],
+            infoKeys: ["MacOSVoiceRate"],
+            environmentKeys: ["IPOP_MACOS_VOICE_RATE", "MACOS_VOICE_RATE"]
         ), let rate = Int(rateString) else {
             return defaultMacOSVoiceRate
         }
@@ -1316,13 +1303,13 @@ final class CompanionManager: ObservableObject {
         }
 
         // At 40 seconds into the video, trigger the onboarding demo where
-        // Clicky flies to something interesting on screen and comments on it
+        // ipop.ai flies to something interesting on screen and comments on it
         let demoTriggerTime = CMTime(seconds: 40, preferredTimescale: 600)
         onboardingDemoTimeObserver = player.addBoundaryTimeObserver(
             forTimes: [NSValue(time: demoTriggerTime)],
             queue: .main
         ) { [weak self] in
-            ClickyAnalytics.trackOnboardingDemoTriggered()
+            IpopAnalytics.trackOnboardingDemoTriggered()
             self?.performOnboardingDemoInteraction()
         }
 
@@ -1333,7 +1320,7 @@ final class CompanionManager: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            ClickyAnalytics.trackOnboardingVideoCompleted()
+            IpopAnalytics.trackOnboardingVideoCompleted()
             self.onboardingVideoOpacity = 0.0
             // Wait for the 2s fade-out animation to complete before tearing down
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -1415,7 +1402,7 @@ final class CompanionManager: ObservableObject {
     // MARK: - Onboarding Demo Interaction
 
     private static let onboardingDemoSystemPrompt = """
-    you're clicky, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
+    you're ipop.ai, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
 
     make a short quirky 3-6 word observation about the specific thing you picked — something fun, playful, or curious that shows you actually read/recognized it. no emojis ever. NEVER quote or repeat text you see on screen — just react to it. keep it to 6 words max, no exceptions.
 

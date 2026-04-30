@@ -580,7 +580,7 @@ enum LocalIntentRouter {
     }
 
     /// Lowercases, trims, and removes filler/wake-word prefixes so a noisy
-    /// transcript like "Um, hey clicky, can you click the file menu, please?"
+    /// transcript like "Um, hey ipop, can you click the file menu, please?"
     /// becomes "click the file menu" for matching.
     private static func normalize(_ transcript: String) -> String {
         var result = transcript
@@ -590,7 +590,7 @@ enum LocalIntentRouter {
         let leadingFillers: [String] = [
             "um ", "uh ", "uhh ", "umm ", "okay ", "ok ", "alright ",
             "please ", "hey ", "hi ", "yo ", "yeah ",
-            "clicky ", "clikie ", "clicky, ", "clicky.",
+            "ipop ", "ipop, ", "ipop.", "ipop.ai ", "ipop.ai, ",
             "buddy ", "learning buddy ", "learning buddy, ",
             "leanring buddy ", "leanring buddy, ",
         ]

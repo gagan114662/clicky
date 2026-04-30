@@ -4,7 +4,7 @@
 //
 //  Data model for a single running or completed Codex agent task.
 //  AgentSessionManager owns a published array of these and the
-//  AgentSiblingsOverlay renders them as "mini clicky siblings".
+//  AgentSiblingsOverlay renders them as mini ipop.ai siblings.
 //
 
 import Foundation

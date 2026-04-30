@@ -2,9 +2,9 @@
 //  AgentSiblingsOverlayWindow.swift
 //  leanring-buddy
 //
-//  Floating panel that shows "mini clicky siblings" — one icon per running
+//  Floating panel that shows mini ipop.ai siblings — one icon per running
 //  or recently completed Codex agent. Inspired by the sibling icons seen in
-//  the original Clicky app: dark rounded squares with a colored triangle and
+//  the original app: dark rounded squares with a colored triangle and
 //  a small status dot (blue = running, green = done, red = failed).
 //
 //  The window lives on top of all other windows (level .floating), never
