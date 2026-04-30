@@ -59,4 +59,31 @@ struct leanring_buddyTests {
         #expect(tasks[1].contains("Parallel Codex session 2"))
     }
 
+    @Test func localIntentCleansCutOffAppLaunchSpeech() async throws {
+        let intent = LocalIntentRouter.route(transcript: "Can you open up Google for me and—")
+
+        #expect(intent == .launchOrActivateApp(name: "google"))
+    }
+
+    @Test func localIntentDropsInlineSpeechFillerFromAppName() async throws {
+        let intent = LocalIntentRouter.route(transcript: "Open, uh, Freeform.")
+
+        #expect(intent == .launchOrActivateApp(name: "freeform"))
+    }
+
+    @Test func localIntentRoutesBareContinuationToClickTarget() async throws {
+        let intent = LocalIntentRouter.route(transcript: "to the Apple icon.")
+
+        #expect(intent == .clickByName(targetName: "apple"))
+    }
+
+    @Test func actionOnlyResponseHasNoSpokenWhitespace() async throws {
+        let parsed = ActionTagParser.parseAllActionTags(
+            from: "[OPEN_APP:Notes] [KEY:cmd+n] [TYPE:pasta tonight]"
+        )
+
+        #expect(parsed.actions.count == 3)
+        #expect(parsed.spokenText == "")
+    }
+
 }
