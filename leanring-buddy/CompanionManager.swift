@@ -151,7 +151,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = Self.initialSelectedModel()
+    @Published var selectedModel: String = CompanionManager.initialSelectedModel()
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
