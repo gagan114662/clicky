@@ -64,6 +64,8 @@ final class CompanionManager: ObservableObject {
     /// Process running `/usr/bin/say` for TTS fallback. Kept so we can
     /// terminate it when a new response starts before the old one finishes.
     private var macOSSpeechProcess: Process?
+    private static let defaultMacOSVoiceName = "Samantha"
+    private static let defaultMacOSVoiceRate = 178
 
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
@@ -1135,9 +1137,62 @@ final class CompanionManager: ObservableObject {
         macOSSpeechProcess?.terminate()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        process.arguments = [text]
+        process.arguments = [
+            "-v", Self.configuredMacOSVoiceName(),
+            "-r", "\(Self.configuredMacOSVoiceRate())",
+            text
+        ]
         macOSSpeechProcess = process
         try? process.run()
+    }
+
+    private static func configuredMacOSVoiceName() -> String {
+        runtimeString(
+            defaultsKeys: ["ClickyMacOSVoiceName", "MacOSVoiceName"],
+            infoKeys: ["ClickyMacOSVoiceName", "MacOSVoiceName"],
+            environmentKeys: ["CLICKY_MACOS_VOICE_NAME", "MACOS_VOICE_NAME"]
+        ) ?? defaultMacOSVoiceName
+    }
+
+    private static func configuredMacOSVoiceRate() -> Int {
+        guard let rateString = runtimeString(
+            defaultsKeys: ["ClickyMacOSVoiceRate", "MacOSVoiceRate"],
+            infoKeys: ["ClickyMacOSVoiceRate", "MacOSVoiceRate"],
+            environmentKeys: ["CLICKY_MACOS_VOICE_RATE", "MACOS_VOICE_RATE"]
+        ), let rate = Int(rateString) else {
+            return defaultMacOSVoiceRate
+        }
+        return max(120, min(rate, 230))
+    }
+
+    private static func runtimeString(
+        defaultsKeys: [String],
+        infoKeys: [String],
+        environmentKeys: [String]
+    ) -> String? {
+        for key in environmentKeys {
+            if let value = ProcessInfo.processInfo.environment[key]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+
+        for key in defaultsKeys {
+            if let value = UserDefaults.standard.string(forKey: key)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+
+        for key in infoKeys {
+            if let value = AppBundleConfiguration.stringValue(forKey: key) {
+                return value
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Point Tag Parsing
