@@ -7,7 +7,7 @@
 
 macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
 
-All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
+API keys should live on a Cloudflare Worker proxy or local development-only credentials — nothing sensitive ships in the app.
 
 ## Architecture
 
@@ -61,12 +61,12 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
 | `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
 | `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
-| `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
+| `AssemblyAIStreamingTranscriptionProvider.swift` | ~550 | Streaming transcription provider. Fetches temp tokens from a configured proxy or direct AssemblyAI API key, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
 | `OpenAIAudioTranscriptionProvider.swift` | ~317 | Upload-based transcription provider. Buffers push-to-talk audio locally, uploads as WAV on release, returns finalized transcript. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
-| `ClaudeAPI.swift` | ~320 | Claude vision API client with streaming (SSE) and non-streaming modes. Supports two auth modes: `proxyURL` (Cloudflare Worker) and `claudeCodeOAuth` (direct Anthropic API using Claude Code Keychain token). TLS warmup optimization, image MIME detection, conversation history support. |
+| `ClaudeAPI.swift` | ~320 | Claude vision API client with streaming (SSE) and non-streaming modes. Supports configured `proxyURL` and `claudeCodeOAuth` auth modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `ClaudeCodeOAuthProvider.swift` | ~70 | Reads the Claude Code OAuth bearer token from the macOS Keychain ("Claude Code-credentials"). Used by CompanionManager to bypass the Cloudflare Worker for Claude calls when the user has Claude Code installed. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
@@ -75,6 +75,13 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
+| `MemoryManager.swift` | ~291 | Persistent memory across sessions. Writes facts to `~/.clicky/memory.md` + `user.md`, persists last 20 exchanges to `history.json`. Background Claude extraction after each turn via ClaudeCodeCLIClient. |
+| `AgentSession.swift` | ~50 | Data model for a single Codex agent task. Holds task description, triangle color (from a 6-color palette), status (running/completed/failed), result, live output, and Codex thread ID. |
+| `AgentSessionManager.swift` | ~300 | Manages multiple concurrent Codex agent sessions (the "siblings") on the shared `codex app-server`. Publishes live output, supports follow-ups, interrupts running turns, archives closed threads, and keeps completed sessions inspectable before cleanup. |
+| `AgentSiblingsOverlayWindow.swift` | ~250 | Floating NSPanel showing "mini clicky siblings" — one dark rounded square icon per agent, with colored triangle + status dot. Non-activating, stays on all Spaces. Click opens session details; long-press dismisses/stops a session. |
+| `AgentSessionDetailWindow.swift` | ~260 | Click-to-inspect floating panel for a Codex sibling. Shows task status, live streamed output, and follow-up composer. |
+| `CodexAppServerClient.swift` | ~600 | Long-lived JSON-RPC client for `codex app-server`. Starts threads, streams events, interrupts turns, archives threads, and kills the server process tree on app exit or parent-process disappearance. |
+| `CodexCLIClient.swift` | ~760 | Legacy/fallback Codex CLI client and transcript classifier for agent tasks. Parses JSONL, captures stderr, closes stdin to avoid hangs, supports parallel task decomposition and follow-up execution. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
 ## Build & Run
