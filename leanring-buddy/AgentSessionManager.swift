@@ -18,6 +18,8 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var sessions: [AgentSession] = []
 
     private var colorCycleIndex = 0
+    private var sessionTasks: [UUID: Task<Void, Never>] = [:]
+    private var cancelledSessionIDs: Set<UUID> = []
 
     // How long a completed/failed session lingers before being removed from
     // the list. Long enough for the user to inspect the agent's work and
@@ -47,6 +49,7 @@ final class AgentSessionManager: ObservableObject {
         let session = AgentSession(taskDescription: prompt, triangleColor: color)
         sessions.append(session)
         let sessionID = session.id
+        cancelledSessionIDs.remove(sessionID)
 
         // Compose the prompt with memory context; codex app-server has no
         // built-in memory injection, so we prepend it ourselves.
@@ -55,13 +58,37 @@ final class AgentSessionManager: ObservableObject {
             return memoryContextBlock + "\n\n" + prompt
         }()
 
-        Task {
+        let task = Task {
+            defer {
+                sessionTasks.removeValue(forKey: sessionID)
+                if !sessions.contains(where: { $0.id == sessionID }) {
+                    cancelledSessionIDs.remove(sessionID)
+                }
+            }
+
+            var threadID: String?
             do {
                 Self.ensureWorkspaceExists()
-                let threadID = try await CodexAppServerClient.shared.startThread(
+                try Task.checkCancellation()
+                guard isSessionActive(id: sessionID) else { return }
+
+                threadID = try await CodexAppServerClient.shared.startThread(
                     cwd: Self.workspaceRoot
                 )
-                self.setThreadID(id: sessionID, threadID: threadID)
+                guard let threadID else { return }
+
+                guard isSessionActive(id: sessionID) else {
+                    print("🛑 Session dismissed before thread registration — archiving \(threadID.prefix(8))")
+                    await CodexAppServerClient.shared.archiveThread(threadID: threadID)
+                    return
+                }
+
+                setThreadID(id: sessionID, threadID: threadID)
+                try Task.checkCancellation()
+                guard isSessionActive(id: sessionID) else {
+                    await CodexAppServerClient.shared.archiveThread(threadID: threadID)
+                    return
+                }
 
                 let result = try await CodexAppServerClient.shared.startTurn(
                     threadID: threadID,
@@ -71,21 +98,33 @@ final class AgentSessionManager: ObservableObject {
                     }
                 )
 
-                let stillExists = sessions.contains(where: { $0.id == sessionID })
-                if stillExists {
+                if isSessionActive(id: sessionID) {
                     markSession(id: sessionID, status: .completed, result: result)
                     onComplete(result)
                 } else {
                     print("🛑 Session was dismissed mid-run — skipping completion TTS")
                 }
+            } catch is CancellationError {
+                if let threadID {
+                    await CodexAppServerClient.shared.interruptTurn(threadID: threadID)
+                    await CodexAppServerClient.shared.archiveThread(threadID: threadID)
+                }
+                print("🛑 Session \(sessionID.uuidString.prefix(8)) task cancelled")
             } catch {
-                let stillExists = sessions.contains(where: { $0.id == sessionID })
-                if stillExists {
+                if let threadID, !isSessionActive(id: sessionID) {
+                    await CodexAppServerClient.shared.archiveThread(threadID: threadID)
+                    return
+                }
+
+                if isSessionActive(id: sessionID) {
                     markSession(id: sessionID, status: .failed, result: error.localizedDescription)
                 }
             }
-            scheduleRemoval(of: sessionID, after: Self.completedSessionLingerSeconds)
+            if isSessionActive(id: sessionID) {
+                scheduleRemoval(of: sessionID, after: Self.completedSessionLingerSeconds)
+            }
         }
+        sessionTasks[sessionID] = task
     }
 
     /// Sends a follow-up prompt to an existing thread on the codex app-server.
@@ -108,8 +147,18 @@ final class AgentSessionManager: ObservableObject {
         sessions[index].status = .running
         sessions[index].result = nil
 
-        Task {
+        let task = Task {
+            defer {
+                sessionTasks.removeValue(forKey: sessionID)
+                if !sessions.contains(where: { $0.id == sessionID }) {
+                    cancelledSessionIDs.remove(sessionID)
+                }
+            }
+
             do {
+                try Task.checkCancellation()
+                guard isSessionActive(id: sessionID) else { return }
+
                 let result = try await CodexAppServerClient.shared.startTurn(
                     threadID: threadID,
                     prompt: prompt,
@@ -120,18 +169,23 @@ final class AgentSessionManager: ObservableObject {
                         self?.handleFollowUpEvent(sessionID: sessionID, header: header, event: event)
                     }
                 )
-                let stillExists = sessions.contains(where: { $0.id == sessionID })
-                if stillExists {
+                if isSessionActive(id: sessionID) {
                     markSession(id: sessionID, status: .completed, result: result)
                 }
+            } catch is CancellationError {
+                await CodexAppServerClient.shared.interruptTurn(threadID: threadID)
+                await CodexAppServerClient.shared.archiveThread(threadID: threadID)
+                print("🛑 Follow-up \(sessionID.uuidString.prefix(8)) task cancelled")
             } catch {
-                let stillExists = sessions.contains(where: { $0.id == sessionID })
-                if stillExists {
+                if isSessionActive(id: sessionID) {
                     markSession(id: sessionID, status: .failed, result: error.localizedDescription)
                 }
             }
-            scheduleRemoval(of: sessionID, after: Self.completedSessionLingerSeconds)
+            if isSessionActive(id: sessionID) {
+                scheduleRemoval(of: sessionID, after: Self.completedSessionLingerSeconds)
+            }
         }
+        sessionTasks[sessionID] = task
     }
 
     // MARK: - Stream → liveOutput
@@ -239,8 +293,13 @@ final class AgentSessionManager: ObservableObject {
 
     private func setThreadID(id: UUID, threadID: String) {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        guard !cancelledSessionIDs.contains(id) else { return }
         sessions[index].codexThreadID = threadID
         print("🧵 Session \(id.uuidString.prefix(8)) → thread \(threadID.prefix(8))")
+    }
+
+    private func isSessionActive(id: UUID) -> Bool {
+        sessions.contains(where: { $0.id == id }) && !cancelledSessionIDs.contains(id)
     }
 
     private func scheduleRemoval(of id: UUID, after seconds: Double) {
@@ -263,6 +322,10 @@ final class AgentSessionManager: ObservableObject {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
         let threadID = sessions[index].codexThreadID
         let wasRunning = sessions[index].status == .running
+        cancelledSessionIDs.insert(id)
+        let task = sessionTasks[id]
+        task?.cancel()
+        sessionTasks.removeValue(forKey: id)
 
         if let threadID {
             print("🛑 Tearing down codex thread \(threadID.prefix(8)) for session \(id.uuidString.prefix(8)) (running=\(wasRunning))")
@@ -272,8 +335,13 @@ final class AgentSessionManager: ObservableObject {
                 }
                 await CodexAppServerClient.shared.archiveThread(threadID: threadID)
             }
+        } else {
+            print("🛑 Session \(id.uuidString.prefix(8)) dismissed before Codex thread was ready")
         }
         sessions.removeAll { $0.id == id }
+        if task == nil {
+            cancelledSessionIDs.remove(id)
+        }
     }
 
     // MARK: - Helpers
