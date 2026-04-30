@@ -664,6 +664,83 @@ final class CompanionManager: ObservableObject {
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
+    private func routeTranscriptToCodexIfNeeded(_ transcript: String) async -> Bool {
+        // Route to Codex before screenshot capture. Agent tasks do not need
+        // screen pixels, and avoiding capture keeps multi-agent requests snappy.
+        let isAgent = CodexCLIClient.isAgentTask(transcript)
+        let codexAvailable = CodexCLIClient.isAvailable()
+        print("🎙️ Transcript received: \"\(transcript)\"")
+        print("🤖 isAgentTask: \(isAgent), Codex available: \(codexAvailable)")
+        guard isAgent && codexAvailable else { return false }
+
+        // PRIVACY: do NOT pass screenshots to Codex agents. Codex tasks
+        // should not receive visible emails, browser tabs, files, or other
+        // sensitive desktop state unless the user explicitly provides it.
+        let screenshotsForCodex: [(data: Data, label: String)] = []
+        let memoryBlock = memoryCacheSystemPromptBlock
+
+        // If the user asked for multiple parallel sessions ("spawn two
+        // sessions, one for X and one for Y"), decompose into N tasks.
+        let parallelTasks = await CodexCLIClient.decomposeTaskIntoParallelTasksWithLLMFallback(transcript)
+        print("🤖 Decomposed into \(parallelTasks.count) parallel task(s):")
+        for (taskIndex, task) in parallelTasks.enumerated() {
+            print("   #\(taskIndex + 1): \(task)")
+        }
+
+        // Show the siblings overlay. The onSelectSession callback fires when
+        // a sibling icon is tapped, opening the detail panel anchored there.
+        agentSiblingsWindowManager.show(
+            sessionManager: agentSessionManager,
+            onSelectSession: { [weak self] sessionID, overlayFrame in
+                guard let self else { return }
+                self.agentSessionDetailWindowManager.show(
+                    sessionID: sessionID,
+                    sessionManager: self.agentSessionManager,
+                    anchoredTo: overlayFrame
+                )
+            }
+        )
+
+        // Acknowledge verbally, then go idle so the user can keep talking
+        // while agents work in the background.
+        voiceState = .idle
+        let acknowledgment = parallelTasks.count > 1
+            ? "On it. Spawning \(parallelTasks.count) agents."
+            : "On it."
+        speakWithMacOSVoice(acknowledgment)
+        scheduleTransientHideIfNeeded()
+
+        // Launch one sibling per task — they all run in parallel.
+        for (taskIndex, individualTask) in parallelTasks.enumerated() {
+            let isMultiTask = parallelTasks.count > 1
+            agentSessionManager.launchAgent(
+                prompt: individualTask,
+                screenshots: screenshotsForCodex,
+                memoryContextBlock: memoryBlock,
+                codexClient: codexCLIClient
+            ) { [weak self] agentResult in
+                guard let self else { return }
+                let trimmedResult = agentResult.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.conversationHistory.append((userTranscript: individualTask, assistantResponse: trimmedResult))
+                if self.conversationHistory.count > 10 {
+                    self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
+                }
+                self.memoryManager.onTurnCompleted(userTranscript: individualTask, assistantResponse: trimmedResult)
+                // Speak only a short confirmation. The user can click the
+                // sibling icon to see the full result.
+                let confirmation = isMultiTask
+                    ? "Task \(taskIndex + 1) ready."
+                    : "Done."
+                self.speakWithMacOSVoice(confirmation)
+                if !self.agentSessionManager.hasAnySessions {
+                    self.agentSiblingsWindowManager.hide()
+                    self.agentSessionDetailWindowManager.hide()
+                }
+            }
+        }
+        return true
+    }
+
     // MARK: - AI Response Pipeline
 
     /// Captures a screenshot, sends it along with the transcript to Claude,
@@ -682,95 +759,14 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
+                if await routeTranscriptToCodexIfNeeded(transcript) {
+                    return
+                }
+
                 // Capture all connected screens so the AI has full context
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
                 guard !Task.isCancelled else { return }
-
-                // Route to Codex agent for task-oriented requests (build, create, browse, etc.)
-                // Spawns a sibling session so the voice UI returns to idle immediately
-                // and the user can talk while agents run in parallel.
-                let isAgent = CodexCLIClient.isAgentTask(transcript)
-                let codexAvailable = CodexCLIClient.isAvailable()
-                print("🎙️ Transcript received: \"\(transcript)\"")
-                print("🤖 isAgentTask: \(isAgent), Codex available: \(codexAvailable)")
-                if isAgent && codexAvailable {
-                    // PRIVACY: do NOT pass screenshots to Codex agents.
-                    // Codex agent tasks (build apps, research, etc.) don't
-                    // need to see the user's screen. Passing the screenshot
-                    // would leak whatever's currently visible — open emails,
-                    // browser tabs, desktop files — to the agent process.
-                    let screenshotsForCodex: [(data: Data, label: String)] = []
-                    let memoryBlock = memoryCacheSystemPromptBlock
-
-                    // If the user asked for multiple parallel sessions ("spawn two
-                    // sessions, one for X and one for Y"), decompose into N tasks.
-                    // Tries fast regex first; if that returns 1 task but the user
-                    // clearly asked for multiple, falls back to Haiku for reliable
-                    // splitting across any natural-language phrasing (~2-3s).
-                    let parallelTasks = await CodexCLIClient.decomposeTaskIntoParallelTasksWithLLMFallback(transcript)
-                    print("🤖 Decomposed into \(parallelTasks.count) parallel task(s):")
-                    for (taskIndex, task) in parallelTasks.enumerated() {
-                        print("   #\(taskIndex + 1): \(task)")
-                    }
-
-                    // Show the siblings overlay. The onSelectSession callback
-                    // fires when a sibling icon is tapped — open the detail
-                    // panel anchored to the overlay column at that moment.
-                    agentSiblingsWindowManager.show(
-                        sessionManager: agentSessionManager,
-                        onSelectSession: { [weak self] sessionID, overlayFrame in
-                            guard let self else { return }
-                            self.agentSessionDetailWindowManager.show(
-                                sessionID: sessionID,
-                                sessionManager: self.agentSessionManager,
-                                anchoredTo: overlayFrame
-                            )
-                        }
-                    )
-
-                    // Acknowledge verbally, then go idle so the user can keep talking
-                    // while agents work in the background.
-                    voiceState = .idle
-                    let acknowledgment = parallelTasks.count > 1
-                        ? "On it. Spawning \(parallelTasks.count) agents."
-                        : "On it."
-                    speakWithMacOSVoice(acknowledgment)
-                    scheduleTransientHideIfNeeded()
-
-                    // Launch one sibling per task — they all run in parallel.
-                    for (taskIndex, individualTask) in parallelTasks.enumerated() {
-                        let isMultiTask = parallelTasks.count > 1
-                        agentSessionManager.launchAgent(
-                            prompt: individualTask,
-                            screenshots: screenshotsForCodex,
-                            memoryContextBlock: memoryBlock,
-                            codexClient: codexCLIClient
-                        ) { [weak self] agentResult in
-                            guard let self else { return }
-                            let trimmedResult = agentResult.trimmingCharacters(in: .whitespacesAndNewlines)
-                            self.conversationHistory.append((userTranscript: individualTask, assistantResponse: trimmedResult))
-                            if self.conversationHistory.count > 10 {
-                                self.conversationHistory.removeFirst(self.conversationHistory.count - 10)
-                            }
-                            self.memoryManager.onTurnCompleted(userTranscript: individualTask, assistantResponse: trimmedResult)
-                            // Speak only a short confirmation — NOT the full codex
-                            // output, which can be thousands of characters and
-                            // take minutes to read aloud. The user can click the
-                            // sibling icon to see the full result.
-                            let confirmation = isMultiTask
-                                ? "Task \(taskIndex + 1) ready."
-                                : "Done."
-                            self.speakWithMacOSVoice(confirmation)
-                            // Hide siblings overlay only once ALL agents have finished.
-                            if !self.agentSessionManager.hasAnySessions {
-                                self.agentSiblingsWindowManager.hide()
-                                self.agentSessionDetailWindowManager.hide()
-                            }
-                        }
-                    }
-                    return
-                }
 
                 // Build image labels with the actual screenshot pixel dimensions
                 // so Claude's coordinate space matches the image it sees. We

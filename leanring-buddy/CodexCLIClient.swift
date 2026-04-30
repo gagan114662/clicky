@@ -86,6 +86,11 @@ final class CodexCLIClient {
             "codex session", "codex agent", "codex sessions", "codex agents",
             "another codex", "another agent", "another session",
             "new codex", "new agent",
+            "parallel codex", "parallel agent", "parallel session",
+            "run 2 sessions", "run two sessions",
+            "start 2 sessions", "start two sessions",
+            "session 1", "session one", "mission 1", "mission one",
+            "task 1", "task one",
             "spawn an agent", "spawn agent",
             "fire up an agent", "fire up a codex",
             "launch an agent", "launch a codex",
@@ -126,6 +131,7 @@ final class CodexCLIClient {
     ///   "agent, build me a snake game"  → unchanged (single task)
     static func decomposeTaskIntoParallelTasks(_ transcript: String) -> [String] {
         let lower = transcript.lowercased()
+        let requestedCount = requestedParallelSessionCount(in: lower)
 
         // Only consider splitting if the user explicitly mentioned multiple sessions / agents.
         // This avoids splitting "build me a calculator and a button" into two unrelated tasks.
@@ -133,14 +139,21 @@ final class CodexCLIClient {
             "spawn ",
             "parallel",
             "in parallel",
+            "2 sessions", "3 sessions", "4 sessions", "5 sessions",
+            "2 agents", "3 agents", "4 agents", "5 agents",
+            "2 codex", "3 codex", "4 codex", "5 codex",
+            "codex sessions", "codex agents",
             "two sessions", "three sessions", "four sessions", "five sessions",
             "two agents", "three agents", "four agents", "five agents",
             "multiple agents", "multiple sessions",
             "siblings",
             "one for",
             "one to",
+            "session 1", "session one", "session 2", "session two",
+            "mission 1", "mission one", "mission 2", "mission two",
+            "task 1", "task one", "task 2", "task two",
         ]
-        let isMultiSession = multiSessionMarkers.contains { lower.contains($0) }
+        let isMultiSession = requestedCount != nil || multiSessionMarkers.contains { lower.contains($0) }
         guard isMultiSession else { return [transcript] }
 
         // Split on enumeration markers people say in natural English when
@@ -154,6 +167,7 @@ final class CodexCLIClient {
         // and digits are allowed bare; "agent"/"session"/"task" alone are
         // NOT, to avoid matching "the agent" etc.):
         //   • one
+        //   • (mission|session|task|agent) (1|2|3|...|one|two|three|...)
         //   • the other (one|agent|session|task)
         //   • another (one|agent|session|task)
         //   • (first|second|third|fourth|fifth) [(one|agent|session|task)]
@@ -164,7 +178,7 @@ final class CodexCLIClient {
         //   "the other one IS to make X"
         //   "another one WILL TO do X"
         //   "second one NEEDS to find X"
-        let collapsedSplitPattern = #"\b(?:(?:(?:the\s+)?other\s+|another\s+)(?:one|agent|session|task)|one|(?:first|second|third|fourth|fifth)(?:\s+(?:one|agent|session|task))?|[1-9])\b(?:[,.):]\s*(?:(?:to|for)\b\s*)?|\s+(?:(?:is|was|are|were|will|would|should|shall|needs?|has|have|had|can|could|may|might|must|just)\s+)?(?:to|for)\b\s*)"#
+        let collapsedSplitPattern = #"\b(?:(?:(?:mission|session|task|agent)\s+)(?:[1-9]|one|two|three|four|five|six|seven|eight|nine)|(?:(?:the\s+)?other\s+|another\s+)(?:one|agent|session|task)|one|(?:first|second|third|fourth|fifth)(?:\s+(?:one|agent|session|task))?|[1-9])\b(?:[,.):]\s*(?:(?:to|for)\b\s*)?|\s+(?:(?:is|was|are|were|will|would|should|shall|needs?|has|have|had|can|could|may|might|must|just)\s+)?(?:to|for)\b\s*)"#
         // Use a sentinel that won't appear in spoken transcripts.
         let splitSentinel = "\u{FFFC}"
         let normalized = transcript.replacingOccurrences(
@@ -174,11 +188,12 @@ final class CodexCLIClient {
         )
 
         if normalized.contains(splitSentinel) {
+            let taskBoundaryTrimmingCharacters = CharacterSet(charactersIn: " ,.?;:!\n\t")
             let parts = normalized
                 .components(separatedBy: splitSentinel)
                 .dropFirst() // discard preamble before the first "one for"
                 .map { rawTask -> String in
-                    var cleaned = rawTask.trimmingCharacters(in: CharacterSet(charactersIn: " ,.?;:!"))
+                    var cleaned = rawTask.trimmingCharacters(in: taskBoundaryTrimmingCharacters)
                     // Strip trailing connectors like "and" or "and then"
                     let trailingConnectors = [" and then", " and"]
                     for connector in trailingConnectors {
@@ -193,7 +208,7 @@ final class CodexCLIClient {
                             cleaned = String(cleaned.dropFirst(filler.count))
                         }
                     }
-                    return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return cleaned.trimmingCharacters(in: taskBoundaryTrimmingCharacters)
                 }
                 .filter { !$0.isEmpty }
             if parts.count >= 2 {
@@ -201,7 +216,43 @@ final class CodexCLIClient {
             }
         }
 
+        if let requestedCount, requestedCount >= 2 {
+            return (1...requestedCount).map { index in
+                "Parallel Codex session \(index): confirm this independent Codex session is running and briefly state that it is ready for a follow-up task."
+            }
+        }
+
         return [transcript]
+    }
+
+    private static func requestedParallelSessionCount(in lower: String) -> Int? {
+        let numberWords = [
+            "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        ]
+        let numberPattern = #"([2-9]|two|three|four|five|six|seven|eight|nine)"#
+        let nounPattern = #"(?:parallel\s+)?(?:codex\s+)?(?:sessions?|agents?|siblings)"#
+        let patterns = [
+            #"\#(numberPattern)\s+\#(nounPattern)"#,
+            #"\#(nounPattern)\s+\#(numberPattern)"#,
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+            guard let match = regex.firstMatch(in: lower, range: range), match.numberOfRanges >= 2 else { continue }
+            for groupIndex in 1..<match.numberOfRanges {
+                guard let groupRange = Range(match.range(at: groupIndex), in: lower) else { continue }
+                let token = String(lower[groupRange])
+                if let digit = Int(token) {
+                    return min(max(digit, 2), 9)
+                }
+                if let wordValue = numberWords[token] {
+                    return wordValue
+                }
+            }
+        }
+        return nil
     }
 
     /// Returns the parallel task list for a transcript. First tries the fast
@@ -218,6 +269,7 @@ final class CodexCLIClient {
         let lower = transcript.lowercased()
         let multiSessionMarkers = [
             "spawn ", "parallel", "in parallel",
+            "2 sessions", "3 sessions", "2 agents", "3 agents",
             "two sessions", "three sessions", "two agents", "three agents",
             "multiple agents", "multiple sessions", "siblings",
             "second agent", "second session",
