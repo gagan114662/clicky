@@ -7,7 +7,7 @@
 	<key>SUFeedURL</key>
 	<string>https://ipop.ai/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>$(SPARKLE_PUBLIC_ED_KEY)</string>
+	<string>MZwNd2qcdUyQyr5cacAaKuzRj7rKoh05/f2rxH8L4Lc=</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
