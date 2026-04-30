@@ -59,6 +59,18 @@ struct leanring_buddyTests {
         #expect(tasks[1].contains("Parallel Codex session 2"))
     }
 
+    @Test func cortexMishearingStillRoutesToTwoCodexSessions() async throws {
+        let transcript = "Can you launch two parallel cortex sessions one to find people who might be looking for a solution like this and to the latest spicy companies that have been funded with a similar concept?"
+
+        #expect(CodexCLIClient.isAgentTask(transcript))
+        #expect(LocalIntentRouter.route(transcript: transcript) == .unmatched)
+
+        let tasks = CodexCLIClient.decomposeTaskIntoParallelTasks(transcript)
+        #expect(tasks.count == 2)
+        #expect(tasks[0] == "find people who might be looking for a solution like this")
+        #expect(tasks[1] == "find the latest spicy companies that have been funded with a similar concept")
+    }
+
     @Test func localIntentCleansCutOffAppLaunchSpeech() async throws {
         let intent = LocalIntentRouter.route(transcript: "Can you open up Google for me and—")
 
