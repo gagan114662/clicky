@@ -71,6 +71,27 @@ struct leanring_buddyTests {
         #expect(tasks[1] == "find the latest spicy companies that have been funded with a similar concept")
     }
 
+    @Test func zaiProviderMapsClaudeModelSelectionToZAIModels() async throws {
+        #expect(
+            ZAIChatClient.resolvedModel(
+                selectedModel: "claude-haiku-4-5-20251001",
+                hasImages: false
+            ) == "glm-4.5"
+        )
+        #expect(
+            ZAIChatClient.resolvedModel(
+                selectedModel: "claude-haiku-4-5-20251001",
+                hasImages: true
+            ) == "glm-4.5v"
+        )
+        #expect(
+            ZAIChatClient.resolvedModel(
+                selectedModel: "glm-4.6v",
+                hasImages: true
+            ) == "glm-4.6v"
+        )
+    }
+
     @Test func localIntentCleansCutOffAppLaunchSpeech() async throws {
         let intent = LocalIntentRouter.route(transcript: "Can you open up Google for me and—")
 
