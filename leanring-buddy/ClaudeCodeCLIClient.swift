@@ -200,6 +200,12 @@ final class ClaudeCodeCLIClient: AnthropicChatClient {
         return try await withCheckedThrowingContinuation { continuation in
             let streamState = ClaudeCodeCLIStreamState()
 
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+                print("🟥 claude stderr: \(chunk.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
@@ -212,6 +218,7 @@ final class ClaudeCodeCLIClient: AnthropicChatClient {
 
             process.terminationHandler = { terminatedProcess in
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
                 guard let accumulatedResponseText = streamState.finishIfNeeded() else { return }
 
                 let duration = Date().timeIntervalSince(startTime)

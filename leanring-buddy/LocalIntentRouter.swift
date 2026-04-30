@@ -28,6 +28,8 @@ enum LocalIntent: Equatable {
     case launchOrActivateApp(name: String)
     /// Send a graceful Quit to the named app.
     case quitApp(name: String)
+    /// Create a new Apple Notes note with the given text.
+    case createNote(text: String)
     /// Click any element in the frontmost app's accessibility tree whose
     /// title matches `targetName`. Generic — covers menu bar items, buttons,
     /// menu items, links, checkboxes, anything labeled.
@@ -70,6 +72,10 @@ enum LocalIntentRouter {
 
         if isCurrentTimeQuery(normalized) {
             return .currentTime
+        }
+
+        if let noteText = parseCreateNoteCommand(normalized) {
+            return .createNote(text: preserveOriginalCasing(of: noteText, from: transcript))
         }
 
         // "navigate to <X>" / "go to the <X> icon" / "show me the <X> menu"
@@ -344,6 +350,32 @@ enum LocalIntentRouter {
         // does that itself, but doing it here makes the matched name cleaner.
         let withoutNoun = stripTrailingUINoun(stripped)
         return withoutNoun.isEmpty ? nil : withoutNoun
+    }
+
+    /// Recognizes common note-taking requests so they do not have to wait
+    /// for Claude to emit OPEN_APP/KEY/TYPE tags.
+    private static func parseCreateNoteCommand(_ text: String) -> String? {
+        let patterns = [
+            #"(?:^|\b)(?:make|create|write|take|add)\s+(?:a\s+)?note(?:\s+for\s+me)?(?:\s+(?:to|that\s+says|saying|about|of))?\s+(.+)$"#,
+            #"(?:^|\b)(?:notes?|notes\s+app)\s+(?:and\s+)?(?:make|create|write|take|add)\s+(?:a\s+)?note(?:\s+for\s+me)?(?:\s+(?:to|that\s+says|saying|about|of))?\s+(.+)$"#,
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  match.numberOfRanges >= 2,
+                  let noteRange = Range(match.range(at: 1), in: text)
+            else { continue }
+
+            let rawNoteText = String(text[noteRange])
+            let cleanedNoteText = stripTrailingFillerAndPunctuation(rawNoteText)
+                .trimmingCharacters(in: CharacterSet(charactersIn: " -—:,.!?"))
+            guard !cleanedNoteText.isEmpty else { continue }
+            return cleanedNoteText
+        }
+
+        return nil
     }
 
     /// Strips noisy trailing phrases voice users often append: " on my mac",
