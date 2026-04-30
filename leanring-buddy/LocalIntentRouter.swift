@@ -53,6 +53,14 @@ enum LocalIntentRouter {
         let normalized = normalize(transcript)
         guard !normalized.isEmpty else { return .unmatched }
 
+        // Agent-session requests are handled before local intents in
+        // CompanionManager. If Codex is unavailable, leave them for Claude
+        // instead of treating "launch two parallel cortex sessions" as an
+        // app named "two parallel cortex sessions".
+        if looksLikeAgentSessionRequest(normalized) {
+            return .unmatched
+        }
+
         // Order: most-specific first so e.g. "scroll up" doesn't get
         // misparsed as a generic verb-object pair.
 
@@ -477,6 +485,38 @@ enum LocalIntentRouter {
             if text.hasSuffix(noun) { return true }
         }
         return false
+    }
+
+    private static func looksLikeAgentSessionRequest(_ text: String) -> Bool {
+        var normalizedAgentText = text
+        let codexSpeechAliases = [
+            #"\bcortex\b"#,
+            #"\bcode\s*x\b"#,
+            #"\bcodecs\b"#,
+            #"\bcodec\b"#,
+            #"\bcode\s+exchange\b"#,
+        ]
+        for alias in codexSpeechAliases {
+            normalizedAgentText = normalizedAgentText.replacingOccurrences(
+                of: alias,
+                with: "codex",
+                options: [.regularExpression]
+            )
+        }
+
+        let words = Set(
+            normalizedAgentText
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+        )
+        let hasLaunchVerb = !words.isDisjoint(with: ["launch", "start", "spawn", "run", "fire", "fork"])
+        let hasSessionNoun = !words.isDisjoint(with: ["session", "sessions", "agent", "agents", "sibling", "siblings", "codex"])
+        let hasAgentContext = normalizedAgentText.contains("parallel")
+            || normalizedAgentText.contains("codex")
+            || words.contains("agent")
+            || words.contains("agents")
+
+        return hasLaunchVerb && hasSessionNoun && hasAgentContext
     }
 
     private static func stripDeterminerPrefix(_ text: String) -> String {

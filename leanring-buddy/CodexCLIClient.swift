@@ -233,7 +233,7 @@ final class CodexCLIClient {
     ///   3. Strong autonomous-action prefixes ("build me a ...", "create a ...", etc.)
     ///      route to the agent.
     static func isAgentTask(_ transcript: String) -> Bool {
-        let lower = transcript.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = normalizedAgentRoutingText(transcript)
 
         // Rule 1 — wake word "agent" / "agents" / "codex" near the start of
         // the transcript (broadened to first 8 words to tolerate filler like
@@ -258,9 +258,11 @@ final class CodexCLIClient {
             "start 2 sessions", "start two sessions",
             "session 1", "session one", "mission 1", "mission one",
             "task 1", "task one",
+            "two codex sessions", "two codex agents",
             "spawn an agent", "spawn agent",
             "fire up an agent", "fire up a codex",
             "launch an agent", "launch a codex",
+            "launch two codex", "launch 2 codex",
             "start an agent", "start a codex",
             "fork an agent", "fork a codex",
         ]
@@ -297,7 +299,7 @@ final class CodexCLIClient {
     ///   "build me three sessions, one for A, one for B, one for C" → ["A", "B", "C"]
     ///   "agent, build me a snake game"  → unchanged (single task)
     static func decomposeTaskIntoParallelTasks(_ transcript: String) -> [String] {
-        let lower = transcript.lowercased()
+        let lower = normalizedAgentRoutingText(transcript)
         let requestedCount = requestedParallelSessionCount(in: lower)
 
         // Only consider splitting if the user explicitly mentioned multiple sessions / agents.
@@ -348,11 +350,22 @@ final class CodexCLIClient {
         let collapsedSplitPattern = #"\b(?:(?:(?:mission|session|task|agent)\s+)(?:[1-9]|one|two|three|four|five|six|seven|eight|nine)|(?:(?:the\s+)?other\s+|another\s+)(?:one|agent|session|task)|one|(?:first|second|third|fourth|fifth)(?:\s+(?:one|agent|session|task))?|[1-9])\b(?:[,.):]\s*(?:(?:to|for)\b\s*)?|\s+(?:(?:is|was|are|were|will|would|should|shall|needs?|has|have|had|can|could|may|might|must|just)\s+)?(?:to|for)\b\s*)"#
         // Use a sentinel that won't appear in spoken transcripts.
         let splitSentinel = "\u{FFFC}"
-        let normalized = transcript.replacingOccurrences(
+        var normalized = transcript.replacingOccurrences(
             of: collapsedSplitPattern,
             with: splitSentinel,
             options: [.regularExpression, .caseInsensitive]
         )
+        if requestedCount == 2 {
+            // Speech often drops the second "one": "two Codex sessions,
+            // one to research users and to find funded competitors."
+            // In a two-session context, treat that second "and to/for" as
+            // the boundary for the other task.
+            normalized = normalized.replacingOccurrences(
+                of: #"\b(?:and|then)\s+(?:to|for)\b\s*"#,
+                with: splitSentinel,
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
 
         if normalized.contains(splitSentinel) {
             let taskBoundaryTrimmingCharacters = CharacterSet(charactersIn: " ,.?;:!\n\t")
@@ -379,7 +392,7 @@ final class CodexCLIClient {
                 }
                 .filter { !$0.isEmpty }
             if parts.count >= 2 {
-                return Array(parts)
+                return carryForwardLeadingActionVerbIfNeeded(Array(parts))
             }
         }
 
@@ -390,6 +403,60 @@ final class CodexCLIClient {
         }
 
         return [transcript]
+    }
+
+    private static func normalizedAgentRoutingText(_ transcript: String) -> String {
+        var lower = transcript
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let codexSpeechAliases = [
+            #"\bcortex\b"#,
+            #"\bcode\s*x\b"#,
+            #"\bcodecs\b"#,
+            #"\bcodec\b"#,
+            #"\bcode\s+exchange\b"#,
+        ]
+        for alias in codexSpeechAliases {
+            lower = lower.replacingOccurrences(
+                of: alias,
+                with: "codex",
+                options: [.regularExpression]
+            )
+        }
+        return lower
+    }
+
+    private static func carryForwardLeadingActionVerbIfNeeded(_ parts: [String]) -> [String] {
+        guard let firstTask = parts.first,
+              let inheritedVerb = leadingActionVerb(in: firstTask)
+        else {
+            return parts
+        }
+
+        return parts.enumerated().map { index, part in
+            guard index > 0, leadingActionVerb(in: part) == nil else {
+                return part
+            }
+            return "\(inheritedVerb) \(part)"
+        }
+    }
+
+    private static func leadingActionVerb(in task: String) -> String? {
+        let firstToken = task
+            .lowercased()
+            .split(whereSeparator: { !$0.isLetter })
+            .first
+            .map(String.init)
+        guard let firstToken else { return nil }
+
+        let actionVerbs: Set<String> = [
+            "audit", "build", "check", "compare", "create", "debug",
+            "design", "draft", "find", "fix", "generate", "inspect",
+            "investigate", "list", "make", "research", "review",
+            "search", "summarize", "test", "update", "write",
+        ]
+        return actionVerbs.contains(firstToken) ? firstToken : nil
     }
 
     private static func requestedParallelSessionCount(in lower: String) -> Int? {
@@ -433,7 +500,7 @@ final class CodexCLIClient {
 
         // Did the user explicitly ask for multiple sessions? If not, don't
         // bother burning an LLM call — single-task requests should stay fast.
-        let lower = transcript.lowercased()
+        let lower = normalizedAgentRoutingText(transcript)
         let multiSessionMarkers = [
             "spawn ", "parallel", "in parallel",
             "2 sessions", "3 sessions", "2 agents", "3 agents",
