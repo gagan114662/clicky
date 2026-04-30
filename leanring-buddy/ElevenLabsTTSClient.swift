@@ -107,29 +107,25 @@ final class ElevenLabsTTSClient {
 
     private nonisolated static func configuredAPIKey() -> String {
         runtimeString(
-            defaultsKeys: ["ClickyElevenLabsAPIKey", "ElevenLabsAPIKey"],
-            infoKeys: ["ClickyElevenLabsAPIKey", "ElevenLabsAPIKey"],
-            environmentKeys: ["CLICKY_ELEVENLABS_API_KEY", "ELEVENLABS_API_KEY"]
-        ) ?? DirectAPICredentials.elevenLabsAPIKey
+            defaultsKeys: ["ElevenLabsAPIKey"],
+            infoKeys: ["ElevenLabsAPIKey"],
+            environmentKeys: ["IPOP_ELEVENLABS_API_KEY", "ELEVENLABS_API_KEY"]
+        ) ?? ""
     }
 
     private nonisolated static func configuredVoiceID() -> String {
         runtimeString(
-            defaultsKeys: ["ClickyElevenLabsVoiceID", "ElevenLabsVoiceID"],
-            infoKeys: ["ClickyElevenLabsVoiceID", "ElevenLabsVoiceID"],
-            environmentKeys: ["CLICKY_ELEVENLABS_VOICE_ID", "ELEVENLABS_VOICE_ID"]
-        ) ?? {
-            let credentialVoiceID = DirectAPICredentials.elevenLabsVoiceID
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return credentialVoiceID.isEmpty ? defaultVoiceID : credentialVoiceID
-        }()
+            defaultsKeys: ["ElevenLabsVoiceID"],
+            infoKeys: ["ElevenLabsVoiceID"],
+            environmentKeys: ["IPOP_ELEVENLABS_VOICE_ID", "ELEVENLABS_VOICE_ID"]
+        ) ?? defaultVoiceID
     }
 
     private nonisolated static func configuredModelID() -> String {
         runtimeString(
-            defaultsKeys: ["ClickyElevenLabsModelID", "ElevenLabsModelID"],
-            infoKeys: ["ClickyElevenLabsModelID", "ElevenLabsModelID"],
-            environmentKeys: ["CLICKY_ELEVENLABS_MODEL_ID", "ELEVENLABS_MODEL_ID"]
+            defaultsKeys: ["ElevenLabsModelID"],
+            infoKeys: ["ElevenLabsModelID"],
+            environmentKeys: ["IPOP_ELEVENLABS_MODEL_ID", "ELEVENLABS_MODEL_ID"]
         ) ?? defaultModelID
     }
 

@@ -17,7 +17,7 @@ enum ZAIChatClientError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConfigured:
-            return "Z.ai is not configured. Set ClickyAIProvider=zai and ClickyZAIAPIKey."
+            return "Z.ai is not configured. Set AIProvider=zai and ZAIAPIKey."
         case .invalidResponse:
             return "Z.ai returned an invalid response."
         case .emptyResponse:
@@ -58,40 +58,40 @@ final class ZAIChatClient: AnthropicChatClient {
 
     static func configuredIfEnabled(selectedModel: String) -> ZAIChatClient? {
         guard let provider = runtimeString(
-            defaultsKeys: ["ClickyAIProvider", "AIProvider"],
-            infoKeys: ["ClickyAIProvider", "AIProvider"],
-            environmentKeys: ["CLICKY_AI_PROVIDER", "AI_PROVIDER"]
+            defaultsKeys: ["AIProvider"],
+            infoKeys: ["AIProvider"],
+            environmentKeys: ["IPOP_AI_PROVIDER", "AI_PROVIDER"]
         )?.lowercased(),
               provider == "zai" || provider == "z.ai" else {
             return nil
         }
 
         guard let apiKey = runtimeString(
-            defaultsKeys: ["ClickyZAIAPIKey", "ZAIAPIKey"],
-            infoKeys: ["ClickyZAIAPIKey", "ZAIAPIKey"],
-            environmentKeys: ["CLICKY_ZAI_API_KEY", "ZAI_API_KEY"]
+            defaultsKeys: ["ZAIAPIKey"],
+            infoKeys: ["ZAIAPIKey"],
+            environmentKeys: ["IPOP_ZAI_API_KEY", "ZAI_API_KEY"]
         ) else {
             return nil
         }
 
         let endpointString = runtimeString(
-            defaultsKeys: ["ClickyZAIEndpointURL", "ZAIEndpointURL"],
-            infoKeys: ["ClickyZAIEndpointURL", "ZAIEndpointURL"],
-            environmentKeys: ["CLICKY_ZAI_ENDPOINT_URL", "ZAI_ENDPOINT_URL"]
+            defaultsKeys: ["ZAIEndpointURL"],
+            infoKeys: ["ZAIEndpointURL"],
+            environmentKeys: ["IPOP_ZAI_ENDPOINT_URL", "ZAI_ENDPOINT_URL"]
         ) ?? defaultEndpoint
 
         guard let endpointURL = URL(string: endpointString) else { return nil }
 
         let textModel = runtimeString(
-            defaultsKeys: ["ClickyZAITextModel", "ZAITextModel"],
-            infoKeys: ["ClickyZAITextModel", "ZAITextModel"],
-            environmentKeys: ["CLICKY_ZAI_TEXT_MODEL", "ZAI_TEXT_MODEL"]
+            defaultsKeys: ["ZAITextModel"],
+            infoKeys: ["ZAITextModel"],
+            environmentKeys: ["IPOP_ZAI_TEXT_MODEL", "ZAI_TEXT_MODEL"]
         ) ?? defaultTextModel
 
         let visionModel = runtimeString(
-            defaultsKeys: ["ClickyZAIVisionModel", "ZAIVisionModel"],
-            infoKeys: ["ClickyZAIVisionModel", "ZAIVisionModel"],
-            environmentKeys: ["CLICKY_ZAI_VISION_MODEL", "ZAI_VISION_MODEL"]
+            defaultsKeys: ["ZAIVisionModel"],
+            infoKeys: ["ZAIVisionModel"],
+            environmentKeys: ["IPOP_ZAI_VISION_MODEL", "ZAI_VISION_MODEL"]
         ) ?? defaultVisionModel
 
         return ZAIChatClient(

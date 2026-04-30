@@ -5,9 +5,9 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/julianjear/makesomething-mac-app/main/appcast.xml</string>
+	<string>https://ipop.ai/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>/l3d2rw5ZZFRU3AadP/w2Zf8FHfhA6bKv16BQOV5OSk=</string>
+	<string>$(SPARKLE_PUBLIC_ED_KEY)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -16,10 +16,12 @@
 	<key>VoiceTranscriptionProvider</key>
 	<string>assemblyai</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Clicky uses your microphone so you can talk to it</string>
+	<string>ipop.ai uses your microphone while push-to-talk is active so it can transcribe your spoken request.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Clicky needs screen recording access to see your screen and help you.</string>
+	<string>ipop.ai uses screen context only when you ask it to understand or act on what is visible.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Clicky uses speech recognition to transcribe your voice when you talk to it</string>
+	<string>ipop.ai uses speech recognition to turn your spoken request into text.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>ipop.ai uses Apple Events to open and control apps when you ask it to perform Mac actions.</string>
 </dict>
 </plist>

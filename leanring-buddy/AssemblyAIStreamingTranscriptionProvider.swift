@@ -21,13 +21,18 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         string: "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480"
     )!
     private static let tokenProxyConfigKeys = [
-        "ClickyAssemblyAITokenProxyURL",
         "AssemblyAITokenProxyURL"
     ]
-    private static let tokenProxyEnvironmentKey = "CLICKY_ASSEMBLYAI_TOKEN_PROXY_URL"
+    private static let tokenProxyEnvironmentKeys = [
+        "IPOP_ASSEMBLYAI_TOKEN_PROXY_URL",
+        "ASSEMBLYAI_TOKEN_PROXY_URL"
+    ]
 
     private static var directAPIKey: String {
-        DirectAPICredentials.assemblyAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        configuredString(
+            configKeys: ["AssemblyAIAPIKey"],
+            environmentKeys: ["IPOP_ASSEMBLYAI_API_KEY", "ASSEMBLYAI_API_KEY"]
+        ) ?? ""
     }
 
     let displayName = "AssemblyAI"
@@ -39,7 +44,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     var unavailableExplanation: String? {
         isConfigured
             ? nil
-            : "AssemblyAI is not configured. Add an AssemblyAI API key or ClickyAssemblyAITokenProxyURL."
+            : "AssemblyAI is not configured. Add an AssemblyAI API key or AssemblyAITokenProxyURL."
     }
 
     /// Single long-lived URLSession shared across all streaming sessions.
@@ -74,7 +79,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
 
     /// Fetches a short-lived AssemblyAI streaming token. Production can use a
     /// configured Worker proxy; local development can opt into a proxy with
-    /// `CLICKY_ASSEMBLYAI_TOKEN_PROXY_URL`. Otherwise we call AssemblyAI
+    /// `IPOP_ASSEMBLYAI_TOKEN_PROXY_URL`. Otherwise we call AssemblyAI
     /// directly with the local direct API credential.
     private func fetchTemporaryToken() async throws -> String {
         if let proxyURL = Self.configuredTokenProxyURL() {
@@ -84,7 +89,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         let apiKey = Self.directAPIKey
         guard !apiKey.isEmpty else {
             throw AssemblyAIStreamingTranscriptionProviderError(
-                message: "AssemblyAI is not configured. Add an API key or ClickyAssemblyAITokenProxyURL."
+                message: "AssemblyAI is not configured. Add an API key or AssemblyAITokenProxyURL."
             )
         }
 
@@ -130,11 +135,32 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
                 return url
             }
         }
-        if let urlString = ProcessInfo.processInfo.environment[tokenProxyEnvironmentKey]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !urlString.isEmpty,
-           let url = URL(string: urlString) {
-            return url
+        let environment = ProcessInfo.processInfo.environment
+        for key in tokenProxyEnvironmentKeys {
+            if let urlString = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !urlString.isEmpty,
+               let url = URL(string: urlString) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func configuredString(configKeys: [String], environmentKeys: [String]) -> String? {
+        for key in configKeys {
+            if let value = AppBundleConfiguration.stringValue(forKey: key)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        for key in environmentKeys {
+            if let value = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
         }
         return nil
     }

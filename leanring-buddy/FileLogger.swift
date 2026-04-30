@@ -2,7 +2,7 @@
 //  FileLogger.swift
 //  leanring-buddy
 //
-//  Mirrors the most important diagnostic prints to ~/Desktop/clicky.log
+//  Mirrors the most important diagnostic prints to ~/Desktop/ipop-ai.log
 //  so we can `tail -f` from a Terminal window and see exactly what the
 //  app is doing in real time, without needing to wrestle Xcode's
 //  cramped debug console.
@@ -18,7 +18,7 @@ enum FileLogger {
     private static let logFileURL: URL = {
         let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Desktop")
-        return desktop.appendingPathComponent("clicky.log")
+        return desktop.appendingPathComponent("ipop-ai.log")
     }()
 
     private static let timestampFormatter: DateFormatter = {
@@ -27,7 +27,7 @@ enum FileLogger {
         return formatter
     }()
 
-    private static let writeQueue = DispatchQueue(label: "com.clicky.filelogger")
+    private static let writeQueue = DispatchQueue(label: "ai.ipop.filelogger")
 
     /// Lazily ensures the log file exists. Called once on first log call.
     private static let bootstrap: Void = {
@@ -38,7 +38,7 @@ enum FileLogger {
         return ()
     }()
 
-    /// Logs a message to both stdout (Xcode console) and ~/Desktop/clicky.log.
+    /// Logs a message to both stdout (Xcode console) and ~/Desktop/ipop-ai.log.
     static func log(_ message: String) {
         // Always print so Xcode console is unaffected for users who can read it.
         print(message)

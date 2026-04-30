@@ -7,8 +7,8 @@ at a slower rate.
 ## Local Overrides
 
 ```sh
-defaults write com.yourcompany.leanring-buddy ClickyMacOSVoiceName "Samantha"
-defaults write com.yourcompany.leanring-buddy ClickyMacOSVoiceRate "178"
+defaults write ai.ipop.mac MacOSVoiceName "Samantha"
+defaults write ai.ipop.mac MacOSVoiceRate "178"
 ```
 
 Try other installed voices:
@@ -21,6 +21,6 @@ say -v Samantha -r 178 "hey, i'm here. what should we work on?"
 To reset to the app default:
 
 ```sh
-defaults delete com.yourcompany.leanring-buddy ClickyMacOSVoiceName
-defaults delete com.yourcompany.leanring-buddy ClickyMacOSVoiceRate
+defaults delete ai.ipop.mac MacOSVoiceName
+defaults delete ai.ipop.mac MacOSVoiceRate
 ```

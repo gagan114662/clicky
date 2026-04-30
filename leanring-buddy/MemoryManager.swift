@@ -2,17 +2,17 @@
 //  MemoryManager.swift
 //  leanring-buddy
 //
-//  Persistent memory across Clicky sessions, mirroring the BuiltinMemoryProvider
+//  Persistent memory across ipop.ai sessions, mirroring the BuiltinMemoryProvider
 //  pattern from Hermes Agent (github.com/nousresearch/hermes-agent).
 //
 //  Two tiers — all local, all free:
 //
-//  1. File-based facts: ~/.clicky/memory.md + ~/.clicky/user.md
+//  1. File-based facts: ~/.ipop-ai/memory.md + ~/.ipop-ai/user.md
 //     Claude extracts durable facts from each exchange and appends them here.
-//     Both files are injected into every session's system prompt so Clicky
+//     Both files are injected into every session's system prompt so ipop.ai
 //     remembers who you are, what you're working on, and your preferences.
 //
-//  2. Conversation history: ~/.clicky/history.json
+//  2. Conversation history: ~/.ipop-ai/history.json
 //     The last 20 exchanges are persisted across app restarts. The most recent
 //     5 are seeded into each session's in-memory history so conversations
 //     resume naturally even after quitting and reopening.
@@ -23,16 +23,16 @@ import Foundation
 final class MemoryManager {
     // MARK: - Storage paths
 
-    private static let clickyStorageDirectory: URL = {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clicky")
+    private static let storageDirectory: URL = {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ipop-ai")
     }()
 
     /// General durable facts: current project, apps in use, work context, preferences.
-    private static let memoryFileURL = clickyStorageDirectory.appendingPathComponent("memory.md")
+    private static let memoryFileURL = storageDirectory.appendingPathComponent("memory.md")
     /// Facts specifically about the user: name, role, location, long-term habits.
-    private static let userProfileFileURL = clickyStorageDirectory.appendingPathComponent("user.md")
+    private static let userProfileFileURL = storageDirectory.appendingPathComponent("user.md")
     /// Last N exchanges persisted across app restarts.
-    private static let historyFileURL = clickyStorageDirectory.appendingPathComponent("history.json")
+    private static let historyFileURL = storageDirectory.appendingPathComponent("history.json")
 
     /// Total exchanges written to history.json
     private static let maxPersistedExchanges = 20
@@ -71,7 +71,7 @@ final class MemoryManager {
                 systemPromptBlock += "\nRECENT CONVERSATION HISTORY:\n"
                 for (index, exchange) in recentHistory.enumerated() {
                     systemPromptBlock += "[\(index + 1)] User: \(exchange.userTranscript)\n"
-                    systemPromptBlock += "     Clicky: \(exchange.assistantResponse)\n"
+                    systemPromptBlock += "     ipop.ai: \(exchange.assistantResponse)\n"
                 }
             }
             systemPromptBlock += "</memory-context>\n"
@@ -114,7 +114,7 @@ final class MemoryManager {
     // MARK: - File I/O
 
     private func ensureStorageDirectoryExists() {
-        let dir = Self.clickyStorageDirectory
+        let dir = Self.storageDirectory
         guard !FileManager.default.fileExists(atPath: dir.path) else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
@@ -171,7 +171,7 @@ final class MemoryManager {
 
         Exchange:
         User: \(userTranscript)
-        Clicky: \(assistantResponse)
+        ipop.ai: \(assistantResponse)
 
         Already in memory.md (skip these):
         \(existingMemory.isEmpty ? "(empty)" : existingMemory)
@@ -193,7 +193,7 @@ final class MemoryManager {
         - If nothing new is worth remembering: return {}
 
         Examples of GOOD facts:
-        - "Building Clicky — a Mac menu-bar AI app."
+        - "Building ipop.ai — a Mac menu-bar AI app."
         - "Prefers Sonnet 4.6 over Opus."
         - "Hates being asked clarifying questions before work starts."
         - "Lives in NYC, lifts at Equinox before work."
@@ -234,7 +234,7 @@ final class MemoryManager {
         let existingUserProfile = readFile(at: Self.userProfileFileURL)
 
         let historyText = history.enumerated().map { index, exchange in
-            "Turn \(index + 1)\nUser: \(exchange.userTranscript)\nClicky: \(exchange.assistantResponse)"
+            "Turn \(index + 1)\nUser: \(exchange.userTranscript)\nipop.ai: \(exchange.assistantResponse)"
         }.joined(separator: "\n\n")
 
         let prompt = """

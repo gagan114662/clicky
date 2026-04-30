@@ -35,10 +35,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🎯 Clicky: Starting...")
-        print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        print("🎯 ipop.ai: Starting...")
+        print("🎯 ipop.ai: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
-        // Enforce single-instance. Because Clicky is a menu bar app
+        // Enforce single-instance. Because ipop.ai is a menu bar app
         // (LSUIElement=true, no dock icon) AND registers itself as a login item
         // via SMAppService, it's very easy to end up with two copies running
         // at once: one auto-launched at login, plus a second one launched by
@@ -47,15 +47,15 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // Claude, and both would spawn `/usr/bin/say`. The user hears two
         // voices overlapping because there are literally two apps speaking.
         //
-        // On launch, terminate any other running copies of Clicky so the
+        // On launch, terminate any other running copies of ipop.ai so the
         // instance that just started (typically the one freshly built by
         // Xcode) is the only one handling push-to-talk and TTS.
-        terminateOtherRunningInstancesOfClicky()
+        terminateOtherRunningInstances()
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
-        ClickyAnalytics.configure()
-        ClickyAnalytics.trackAppOpened()
+        IpopAnalytics.configure()
+        IpopAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
@@ -72,7 +72,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         companionManager.stop()
     }
 
-    /// Kills any other copies of Clicky that are already running so this
+    /// Kills any other copies of ipop.ai that are already running so this
     /// newly-launched process is the sole instance. Called at launch to
     /// prevent duplicated push-to-talk + TTS pipelines when the login-item
     /// copy and an Xcode-launched copy are running at the same time.
@@ -81,34 +81,34 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     /// that when a developer hits Cmd+R in Xcode, the fresh build takes
     /// over instead of being silently ignored in favor of the stale login
     /// item copy.
-    /// All known Clicky bundle identifiers — catches both the Xcode dev build
-    /// and FarzaTV's packaged release so neither can run alongside ours.
-    private static let allClickyBundleIdentifiers = [
+    /// All known bundle identifiers — catches previous beta/dev builds so they
+    /// cannot run alongside the production app.
+    private static let allKnownBundleIdentifiers = [
+        "ai.ipop.mac",
         "com.yourcompany.leanring-buddy",
         "com.humansongs.clicky",
     ]
 
-    private func terminateOtherRunningInstancesOfClicky() {
-        guard let ownBundleIdentifier = Bundle.main.bundleIdentifier else { return }
+    private func terminateOtherRunningInstances() {
         let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
 
-        let otherInstancesOfClicky = Self.allClickyBundleIdentifiers
+        let otherInstances = Self.allKnownBundleIdentifiers
             .flatMap { bundleID in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) }
             .filter { runningApplication in
                 runningApplication.processIdentifier != ownProcessIdentifier
             }
 
-        guard !otherInstancesOfClicky.isEmpty else { return }
+        guard !otherInstances.isEmpty else { return }
 
-        print("🎯 Clicky: found \(otherInstancesOfClicky.count) other running instance(s), terminating them")
-        for otherInstanceOfClicky in otherInstancesOfClicky {
+        print("🎯 ipop.ai: found \(otherInstances.count) other running instance(s), terminating them")
+        for otherInstance in otherInstances {
             // Ask nicely first so the other instance can clean up its CGEvent
             // tap, audio engine, etc. via applicationWillTerminate. If it
             // doesn't exit within a short grace period, force-kill it so it
             // can't keep stealing our push-to-talk keypresses.
-            let didTerminateGracefully = otherInstanceOfClicky.terminate()
+            let didTerminateGracefully = otherInstance.terminate()
             if !didTerminateGracefully {
-                otherInstanceOfClicky.forceTerminate()
+                otherInstance.forceTerminate()
             }
         }
 
@@ -118,7 +118,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // and the first push-to-talk after launch still double-fires.
         let maxWaitUntilOthersExit = Date().addingTimeInterval(1.5)
         while Date() < maxWaitUntilOthersExit {
-            let stillRunning = Self.allClickyBundleIdentifiers
+            let stillRunning = Self.allKnownBundleIdentifiers
                 .flatMap { bundleID in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) }
                 .contains { runningApplication in
                     runningApplication.processIdentifier != ownProcessIdentifier
@@ -130,7 +130,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Force-kill any stragglers that still haven't exited.
-        let stragglers = Self.allClickyBundleIdentifiers
+        let stragglers = Self.allKnownBundleIdentifiers
             .flatMap { bundleID in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) }
             .filter { runningApplication in
                 runningApplication.processIdentifier != ownProcessIdentifier
@@ -148,9 +148,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if loginItemService.status != .enabled {
             do {
                 try loginItemService.register()
-                print("🎯 Clicky: Registered as login item")
+                print("🎯 ipop.ai: Registered as login item")
             } catch {
-                print("⚠️ Clicky: Failed to register as login item: \(error)")
+                print("⚠️ ipop.ai: Failed to register as login item: \(error)")
             }
         }
     }
@@ -166,7 +166,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         do {
             try updaterController.updater.start()
         } catch {
-            print("⚠️ Clicky: Sparkle updater failed to start: \(error)")
+            print("⚠️ ipop.ai: Sparkle updater failed to start: \(error)")
         }
     }
 }

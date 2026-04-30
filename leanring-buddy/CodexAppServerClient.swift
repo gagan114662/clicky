@@ -5,7 +5,7 @@
 //  Long-lived JSON-RPC 2.0 client for `codex app-server` (the same protocol
 //  the official Codex VS Code extension uses). Replaces the old `codex exec`
 //  subprocess-per-task model with a single persistent server that hosts
-//  multiple concurrent "threads" — one per Clicky sibling.
+//  multiple concurrent "threads" — one per ipop.ai sibling.
 //
 //  Protocol (newline-delimited JSON over stdio):
 //    1. App sends `initialize` with clientInfo  → server returns hello
@@ -247,7 +247,7 @@ final class CodexAppServerClient {
     /// Synchronously terminates the codex app-server subprocess AND every
     /// descendant (the node wrapper, the actual codex binary, any child
     /// shells codex spawned). Called from NSApplicationWillTerminate so
-    /// codex doesn't outlive Clicky. Without this, every Clicky restart
+    /// codex doesn't outlive ipop.ai. Without this, every app restart
     /// leaks an app-server tree — they end up running indefinitely
     /// consuming the user's quota.
     func shutdownSync() {
@@ -332,7 +332,7 @@ final class CodexAppServerClient {
 
     private static func findBinaryPath() -> String? {
         let candidates = [
-            "\(NSHomeDirectory())/.local/bin/codex-clicky",
+            "\(NSHomeDirectory())/.local/bin/codex-ipop",
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
         ]
@@ -453,7 +453,7 @@ final class CodexAppServerClient {
 
     private func runInitializeHandshake() async throws {
         let params: [String: Any] = [
-            "clientInfo": ["name": "clicky", "version": "1.0"]
+            "clientInfo": ["name": "ipop.ai", "version": "0.1"]
         ]
         _ = try await sendRequest(method: "initialize", params: params)
         try sendNotification(method: "initialized")
@@ -491,9 +491,9 @@ final class CodexAppServerClient {
     }
 
     /// Runs codex under a tiny shell watchdog. Xcode's Stop button can kill the
-    /// Clicky app without delivering normal app-termination notifications, so
+    /// ipop.ai without delivering normal app-termination notifications, so
     /// `shutdownSync()` never gets a chance to run. This wrapper keeps a small
-    /// parent-PID monitor alive next to codex; if the Clicky PID disappears, it
+    /// parent-PID monitor alive next to codex; if the app PID disappears, it
     /// kills the codex app-server subtree and exits.
     private static let parentWatchdogWrapperScript = #"""
 codex_bin="$1"
