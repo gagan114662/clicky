@@ -56,7 +56,7 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
     }
 }
 
-private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscriptionSession {
+private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscriptionSession, @unchecked Sendable {
     let finalTranscriptFallbackDelaySeconds: TimeInterval = 8.0
 
     private struct TranscriptionResponse: Decodable {

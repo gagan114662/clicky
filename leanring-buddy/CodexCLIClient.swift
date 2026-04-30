@@ -32,6 +32,173 @@ enum CodexCLIError: Error, LocalizedError {
     }
 }
 
+private struct CodexCLIStreamUpdate {
+    var threadIDs: [String] = []
+    var progressSnapshots: [String] = []
+    var errorMessage: String?
+}
+
+private final class CodexCLIStreamState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasResumed = false
+    private var accumulatedResponseText = ""
+    private var lineBuffer = ""
+    private var stderrBuffer = ""
+
+    func appendStderrChunk(_ chunk: String) {
+        lock.lock()
+        stderrBuffer += chunk
+        lock.unlock()
+    }
+
+    func appendStdoutChunk(_ chunk: String) -> CodexCLIStreamUpdate {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !hasResumed else { return CodexCLIStreamUpdate() }
+
+        lineBuffer += chunk
+        var update = CodexCLIStreamUpdate()
+
+        while let newlineIndex = lineBuffer.firstIndex(of: "\n") {
+            let line = String(lineBuffer[lineBuffer.startIndex..<newlineIndex])
+            lineBuffer = String(lineBuffer[lineBuffer.index(after: newlineIndex)...])
+
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let eventData = trimmed.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
+                  let eventType = event["type"] as? String
+            else { continue }
+
+            if eventType == "thread.started",
+               let threadID = event["thread_id"] as? String, !threadID.isEmpty {
+                update.threadIDs.append(threadID)
+            }
+
+            if (eventType == "output_text.delta" || eventType == "response.output_text.delta"),
+               let delta = event["delta"] as? String, !delta.isEmpty {
+                accumulatedResponseText += delta
+                update.progressSnapshots.append(accumulatedResponseText)
+            }
+
+            if eventType == "item.completed",
+               let item = event["item"] as? [String: Any],
+               let renderedText = renderCompletedItem(item) {
+                appendRenderedText(renderedText)
+                update.progressSnapshots.append(accumulatedResponseText)
+            }
+
+            if eventType == "error" || eventType == "turn.failed" {
+                hasResumed = true
+                update.errorMessage = Self.errorMessage(from: event)
+                break
+            }
+        }
+
+        return update
+    }
+
+    func finishIfNeeded(exitCode: Int32) -> Result<String, CodexCLIError>? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !hasResumed else { return nil }
+        hasResumed = true
+
+        if accumulatedResponseText.isEmpty {
+            let stderrSnippet = stderrBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stderrSnippet.isEmpty {
+                let detail = String(stderrSnippet.suffix(500))
+                return .failure(.agentError("codex exit \(exitCode): \(detail)"))
+            }
+            return .failure(.noResponseReceived)
+        }
+
+        return .success(accumulatedResponseText)
+    }
+
+    private func appendRenderedText(_ text: String) {
+        if accumulatedResponseText.isEmpty {
+            accumulatedResponseText = text
+        } else {
+            accumulatedResponseText += "\n\n" + text
+        }
+    }
+
+    private func renderCompletedItem(_ item: [String: Any]) -> String? {
+        let itemType = item["type"] as? String ?? ""
+
+        switch itemType {
+        case "agent_message", "message":
+            if let text = item["text"] as? String, !text.isEmpty {
+                return text
+            }
+            if let contentArray = item["content"] as? [[String: Any]] {
+                let joined = contentArray.compactMap { block -> String? in
+                    guard let blockType = block["type"] as? String,
+                          blockType == "output_text" || blockType == "text" else { return nil }
+                    return block["text"] as? String
+                }.joined()
+                return joined.isEmpty ? nil : joined
+            }
+            return nil
+
+        case "command_execution", "shell_command":
+            let commandText: String? = {
+                if let command = item["command"] as? String { return command }
+                if let command = item["command"] as? [String] { return command.joined(separator: " ") }
+                return nil
+            }()
+            guard let commandText else { return nil }
+
+            var text = "$ \(commandText)"
+            if let output = item["aggregated_output"] as? String,
+               !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                text += "\n" + output.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return text
+
+        case "file_change", "edit", "patch":
+            if let changes = item["changes"] as? [[String: Any]] {
+                let lines = changes.compactMap { change -> String? in
+                    guard let path = change["path"] as? String else { return nil }
+                    let kind = (change["kind"] as? String) ?? "edit"
+                    let icon: String = {
+                        switch kind {
+                        case "add": return "+"
+                        case "delete": return "-"
+                        default: return "edit"
+                        }
+                    }()
+                    return "\(icon) \(path)"
+                }
+                return lines.isEmpty ? nil : lines.joined(separator: "\n")
+            }
+            if let path = item["path"] as? String {
+                return "edit \(path)"
+            }
+            return nil
+
+        case "reasoning":
+            return nil
+
+        default:
+            if let text = item["text"] as? String, !text.isEmpty {
+                return "[\(itemType)] \(text)"
+            }
+            return nil
+        }
+    }
+
+    private static func errorMessage(from event: [String: Any]) -> String {
+        if let message = event["message"] as? String { return message }
+        if let error = event["error"] as? [String: Any],
+           let message = error["message"] as? String { return message }
+        return "Unknown Codex error"
+    }
+}
+
 /// Runs agent tasks using the Codex CLI bundled in /Applications/Clicky.app.
 /// Uses the Codex subscription stored at ~/.codex/auth.json — no API key needed.
 final class CodexCLIClient {
@@ -446,17 +613,14 @@ final class CodexCLIClient {
         Task { @MainActor in onProcessStarted(runningProcess) }
 
         return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
-            var accumulatedResponseText = ""
-            var lineBuffer = ""
-            var stderrBuffer = ""
+            let streamState = CodexCLIStreamState()
 
             // Capture stderr so we can surface real codex error messages when
             // the subprocess exits without producing usable JSONL on stdout.
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-                stderrBuffer += chunk
+                streamState.appendStderrChunk(chunk)
                 // Echo stderr to Xcode console too so the developer can see
                 // codex errors live during a session.
                 print("🟥 codex stderr: \(chunk.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -465,156 +629,32 @@ final class CodexCLIClient {
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-                lineBuffer += chunk
 
-                // Each JSONL event is newline-terminated
-                while let newlineIndex = lineBuffer.firstIndex(of: "\n") {
-                    let line = String(lineBuffer[lineBuffer.startIndex..<newlineIndex])
-                    lineBuffer = String(lineBuffer[lineBuffer.index(after: newlineIndex)...])
-
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty,
-                          let eventData = trimmed.data(using: .utf8),
-                          let event = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
-                          let eventType = event["type"] as? String
-                    else { continue }
-
-                    // thread.started — emit the codex thread/session ID so the
-                    // session can be resumed later for follow-up messages.
-                    if eventType == "thread.started",
-                       let threadID = event["thread_id"] as? String, !threadID.isEmpty {
-                        Task { @MainActor in await onThreadStarted(threadID) }
-                    }
-
-                    // Streaming text deltas — Codex streams partial output as it works
-                    if (eventType == "output_text.delta" || eventType == "response.output_text.delta"),
-                       let delta = event["delta"] as? String, !delta.isEmpty {
-                        accumulatedResponseText += delta
-                        let snapshot = accumulatedResponseText
-                        Task { @MainActor in await onProgressChunk(snapshot) }
-                    }
-
-                    // Completed item — codex emits these for agent messages,
-                    // tool calls (shell commands, file edits), and reasoning.
-                    // We surface them all so the panel shows what the agent
-                    // is doing in real time.
-                    if eventType == "item.completed",
-                       let item = event["item"] as? [String: Any] {
-                        let itemType = item["type"] as? String ?? ""
-                        var renderedText: String?
-
-                        switch itemType {
-                        case "agent_message", "message":
-                            // New shape: item.text directly (codex >= 0.124).
-                            // Old shape: item.content[].text (legacy).
-                            if let text = item["text"] as? String, !text.isEmpty {
-                                renderedText = text
-                            } else if let contentArray = item["content"] as? [[String: Any]] {
-                                let joined = contentArray.compactMap { block -> String? in
-                                    guard let blockType = block["type"] as? String,
-                                          blockType == "output_text" || blockType == "text" else { return nil }
-                                    return block["text"] as? String
-                                }.joined()
-                                if !joined.isEmpty { renderedText = joined }
-                            }
-
-                        case "command_execution", "shell_command":
-                            // Tool call running a shell command — show the
-                            // command and any aggregated stdout so the user
-                            // sees what codex is doing in real time.
-                            let cmd: String? = {
-                                if let s = item["command"] as? String { return s }
-                                if let arr = item["command"] as? [String] { return arr.joined(separator: " ") }
-                                return nil
-                            }()
-                            if let cmd {
-                                var text = "$ \(cmd)"
-                                if let output = item["aggregated_output"] as? String,
-                                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    text += "\n" + output.trimmingCharacters(in: .whitespacesAndNewlines)
-                                }
-                                renderedText = text
-                            }
-
-                        case "file_change", "edit", "patch":
-                            // Codex emits {path, kind} entries inside `changes`.
-                            // Older builds emitted top-level `path`. Handle both.
-                            if let changes = item["changes"] as? [[String: Any]] {
-                                let lines = changes.compactMap { change -> String? in
-                                    guard let path = change["path"] as? String else { return nil }
-                                    let kind = (change["kind"] as? String) ?? "edit"
-                                    let icon: String = {
-                                        switch kind {
-                                        case "add": return "+"
-                                        case "delete": return "−"
-                                        default: return "✎"
-                                        }
-                                    }()
-                                    return "\(icon) \(path)"
-                                }
-                                if !lines.isEmpty {
-                                    renderedText = lines.joined(separator: "\n")
-                                }
-                            } else if let path = item["path"] as? String {
-                                renderedText = "✎ \(path)"
-                            }
-
-                        case "reasoning":
-                            // Skip reasoning items — too noisy
-                            renderedText = nil
-
-                        default:
-                            // Unknown item type — log and surface text if any
-                            if let text = item["text"] as? String, !text.isEmpty {
-                                renderedText = "[\(itemType)] \(text)"
-                            }
-                        }
-
-                        if let text = renderedText {
-                            if accumulatedResponseText.isEmpty {
-                                accumulatedResponseText = text
-                            } else {
-                                accumulatedResponseText += "\n\n" + text
-                            }
-                            let snapshot = accumulatedResponseText
-                            Task { @MainActor in await onProgressChunk(snapshot) }
-                        }
-                    }
-
-                    // Error events — surface as thrown errors so CompanionManager can respond gracefully
-                    if eventType == "error" || eventType == "turn.failed" {
-                        let errorMessage: String = {
-                            if let msg = event["message"] as? String { return msg }
-                            if let errObj = event["error"] as? [String: Any],
-                               let msg = errObj["message"] as? String { return msg }
-                            return "Unknown Codex error"
-                        }()
-                        if !resumed {
-                            resumed = true
-                            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                            continuation.resume(throwing: CodexCLIError.agentError(errorMessage))
-                        }
-                    }
+                let update = streamState.appendStdoutChunk(chunk)
+                for threadID in update.threadIDs {
+                    Task { @MainActor in onThreadStarted(threadID) }
+                }
+                for snapshot in update.progressSnapshots {
+                    Task { @MainActor in onProgressChunk(snapshot) }
+                }
+                if let errorMessage = update.errorMessage {
+                    stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                    stderrPipe.fileHandleForReading.readabilityHandler = nil
+                    continuation.resume(throwing: CodexCLIError.agentError(errorMessage))
                 }
             }
 
             process.terminationHandler = { terminatedProcess in
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
-                guard !resumed else { return }
-                resumed = true
-
-                if accumulatedResponseText.isEmpty {
-                    let stderrSnippet = stderrBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let exitCode = terminatedProcess.terminationStatus
-                    if !stderrSnippet.isEmpty {
-                        let detail = String(stderrSnippet.suffix(500))
-                        continuation.resume(throwing: CodexCLIError.agentError("codex exit \(exitCode): \(detail)"))
-                    } else {
-                        continuation.resume(throwing: CodexCLIError.noResponseReceived)
-                    }
-                } else {
+                guard let result = streamState.finishIfNeeded(exitCode: terminatedProcess.terminationStatus) else {
+                    return
+                }
+                switch result {
+                case .success(let accumulatedResponseText):
                     continuation.resume(returning: accumulatedResponseText)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
                 }
             }
         }
@@ -673,134 +713,41 @@ final class CodexCLIClient {
         Task { @MainActor in onProcessStarted(runningProcess) }
 
         return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
-            var accumulatedResponseText = ""
-            var lineBuffer = ""
-            var stderrBuffer = ""
+            let streamState = CodexCLIStreamState()
 
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-                stderrBuffer += chunk
+                streamState.appendStderrChunk(chunk)
                 print("🟥 codex stderr (resume): \(chunk.trimmingCharacters(in: .whitespacesAndNewlines))")
             }
 
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-                lineBuffer += chunk
 
-                while let newlineIndex = lineBuffer.firstIndex(of: "\n") {
-                    let line = String(lineBuffer[lineBuffer.startIndex..<newlineIndex])
-                    lineBuffer = String(lineBuffer[lineBuffer.index(after: newlineIndex)...])
-
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty,
-                          let eventData = trimmed.data(using: .utf8),
-                          let event = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
-                          let eventType = event["type"] as? String
-                    else { continue }
-
-                    if (eventType == "output_text.delta" || eventType == "response.output_text.delta"),
-                       let delta = event["delta"] as? String, !delta.isEmpty {
-                        accumulatedResponseText += delta
-                        let snapshot = accumulatedResponseText
-                        Task { @MainActor in await onProgressChunk(snapshot) }
-                    }
-
-                    if eventType == "item.completed",
-                       let item = event["item"] as? [String: Any] {
-                        let itemType = item["type"] as? String ?? ""
-                        var renderedText: String?
-                        switch itemType {
-                        case "agent_message", "message":
-                            if let text = item["text"] as? String, !text.isEmpty {
-                                renderedText = text
-                            } else if let contentArray = item["content"] as? [[String: Any]] {
-                                let joined = contentArray.compactMap { block -> String? in
-                                    guard let blockType = block["type"] as? String,
-                                          blockType == "output_text" || blockType == "text" else { return nil }
-                                    return block["text"] as? String
-                                }.joined()
-                                if !joined.isEmpty { renderedText = joined }
-                            }
-                        case "command_execution", "shell_command":
-                            let cmd: String? = {
-                                if let s = item["command"] as? String { return s }
-                                if let arr = item["command"] as? [String] { return arr.joined(separator: " ") }
-                                return nil
-                            }()
-                            if let cmd {
-                                var text = "$ \(cmd)"
-                                if let output = item["aggregated_output"] as? String,
-                                   !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    text += "\n" + output.trimmingCharacters(in: .whitespacesAndNewlines)
-                                }
-                                renderedText = text
-                            }
-                        case "file_change", "edit", "patch":
-                            if let changes = item["changes"] as? [[String: Any]] {
-                                let lines = changes.compactMap { change -> String? in
-                                    guard let path = change["path"] as? String else { return nil }
-                                    let kind = (change["kind"] as? String) ?? "edit"
-                                    let icon: String = kind == "add" ? "+" : (kind == "delete" ? "−" : "✎")
-                                    return "\(icon) \(path)"
-                                }
-                                if !lines.isEmpty { renderedText = lines.joined(separator: "\n") }
-                            } else if let path = item["path"] as? String {
-                                renderedText = "✎ \(path)"
-                            }
-                        case "reasoning":
-                            renderedText = nil
-                        default:
-                            if let text = item["text"] as? String, !text.isEmpty {
-                                renderedText = "[\(itemType)] \(text)"
-                            }
-                        }
-                        if let text = renderedText {
-                            if accumulatedResponseText.isEmpty {
-                                accumulatedResponseText = text
-                            } else {
-                                accumulatedResponseText += "\n\n" + text
-                            }
-                            let snapshot = accumulatedResponseText
-                            Task { @MainActor in await onProgressChunk(snapshot) }
-                        }
-                    }
-
-                    if eventType == "error" || eventType == "turn.failed" {
-                        let errorMessage: String = {
-                            if let msg = event["message"] as? String { return msg }
-                            if let errObj = event["error"] as? [String: Any],
-                               let msg = errObj["message"] as? String { return msg }
-                            return "Unknown Codex error"
-                        }()
-                        if !resumed {
-                            resumed = true
-                            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                            stderrPipe.fileHandleForReading.readabilityHandler = nil
-                            continuation.resume(throwing: CodexCLIError.agentError(errorMessage))
-                        }
-                    }
+                let update = streamState.appendStdoutChunk(chunk)
+                for snapshot in update.progressSnapshots {
+                    Task { @MainActor in onProgressChunk(snapshot) }
+                }
+                if let errorMessage = update.errorMessage {
+                    stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                    stderrPipe.fileHandleForReading.readabilityHandler = nil
+                    continuation.resume(throwing: CodexCLIError.agentError(errorMessage))
                 }
             }
 
             process.terminationHandler = { terminatedProcess in
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
-                guard !resumed else { return }
-                resumed = true
-                if accumulatedResponseText.isEmpty {
-                    let stderrSnippet = stderrBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let exitCode = terminatedProcess.terminationStatus
-                    if !stderrSnippet.isEmpty {
-                        let detail = String(stderrSnippet.suffix(500))
-                        continuation.resume(throwing: CodexCLIError.agentError("codex exit \(exitCode): \(detail)"))
-                    } else {
-                        continuation.resume(throwing: CodexCLIError.noResponseReceived)
-                    }
-                } else {
+                guard let result = streamState.finishIfNeeded(exitCode: terminatedProcess.terminationStatus) else {
+                    return
+                }
+                switch result {
+                case .success(let accumulatedResponseText):
                     continuation.resume(returning: accumulatedResponseText)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
                 }
             }
         }

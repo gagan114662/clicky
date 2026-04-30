@@ -36,10 +36,23 @@ enum ClaudeAuthMode {
     }
 }
 
+private final class ClaudeAPITLSWarmupState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasStarted = false
+
+    func markStartedIfNeeded() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !hasStarted else { return false }
+        hasStarted = true
+        return true
+    }
+}
+
 /// Claude API helper with streaming for progressive text display.
 class ClaudeAPI: AnthropicChatClient {
-    private static let tlsWarmupLock = NSLock()
-    private static var hasStartedTLSWarmup = false
+    private static let tlsWarmupState = ClaudeAPITLSWarmupState()
 
     private let authMode: ClaudeAuthMode
     var model: String
@@ -109,14 +122,7 @@ class ClaudeAPI: AnthropicChatClient {
     /// Sends a no-op HEAD request to the API host to establish and cache a TLS session.
     /// Failures are silently ignored — this is purely an optimization.
     private func warmUpTLSConnectionIfNeeded() {
-        Self.tlsWarmupLock.lock()
-        let shouldStartTLSWarmup = !Self.hasStartedTLSWarmup
-        if shouldStartTLSWarmup {
-            Self.hasStartedTLSWarmup = true
-        }
-        Self.tlsWarmupLock.unlock()
-
-        guard shouldStartTLSWarmup else { return }
+        guard Self.tlsWarmupState.markStartedIfNeeded() else { return }
 
         var warmupRequest = URLRequest(url: authMode.tlsWarmupURL)
         warmupRequest.httpMethod = "HEAD"

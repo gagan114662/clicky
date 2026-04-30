@@ -140,7 +140,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     }
 }
 
-private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStreamingTranscriptionSession {
+private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStreamingTranscriptionSession, @unchecked Sendable {
     private struct MessageEnvelope: Decodable {
         let type: String
     }
@@ -406,9 +406,9 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
         explicitFinalTranscriptDeadlineWorkItem?.cancel()
 
         let deadlineWorkItem = DispatchWorkItem { [weak self] in
-            self?.stateQueue.async {
-                guard let self else { return }
-                self.deliverFinalTranscriptIfNeeded(self.bestAvailableTranscriptText())
+            guard let session = self else { return }
+            session.stateQueue.async {
+                session.deliverFinalTranscriptIfNeeded(session.bestAvailableTranscriptText())
             }
         }
 
