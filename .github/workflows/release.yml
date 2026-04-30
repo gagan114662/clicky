@@ -40,8 +40,6 @@ jobs:
           restore-keys: ${{ runner.os }}-spm-
 
       - name: Archive
-        env:
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
         run: |
           set -o pipefail
           xcodebuild archive \
@@ -52,7 +50,6 @@ jobs:
             DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
             PRODUCT_BUNDLE_IDENTIFIER=ai.ipop.mac \
             PRODUCT_NAME="ipop.ai" \
-            SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
             | xcpretty
 
       - name: Export app
@@ -130,3 +127,31 @@ jobs:
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.IPOP_AI_RELEASE_TOKEN }}
+
+      - name: Generate Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          SPARKLE_BIN=$(find ~/Library/Developer/Xcode/DerivedData/leanring-buddy*/SourcePackages/artifacts/sparkle/Sparkle/bin -maxdepth 0 2>/dev/null | head -1)
+          mkdir -p "$RUNNER_TEMP/sparkle"
+          cp "$RUNNER_TEMP/ipop-ai-beta.dmg" "$RUNNER_TEMP/sparkle/ipop-ai-beta.dmg"
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$SPARKLE_BIN/generate_appcast" \
+            --ed-key-file - \
+            --download-url-prefix "https://github.com/gagan114662/ipop-ai/releases/download/${{ github.ref_name }}/" \
+            -o "$RUNNER_TEMP/appcast.xml" \
+            "$RUNNER_TEMP/sparkle"
+
+      - name: Publish Sparkle appcast
+        env:
+          GH_TOKEN: ${{ secrets.IPOP_AI_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          gh repo clone gagan114662/ipop-ai "$RUNNER_TEMP/ipop-ai-site"
+          cp "$RUNNER_TEMP/appcast.xml" "$RUNNER_TEMP/ipop-ai-site/appcast.xml"
+          cd "$RUNNER_TEMP/ipop-ai-site"
+          git add appcast.xml
+          git commit -m "Update appcast for ${{ github.ref_name }}" || exit 0
+          git push

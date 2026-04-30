@@ -45,8 +45,7 @@ DMG_BACKGROUND="${PROJECT_DIR}/dmg-background.png"
 
 GITHUB_REPO="gagan114662/ipop-ai"
 DMG_FILENAME="ipop-ai-beta.dmg"
-
-: "${SPARKLE_PUBLIC_ED_KEY:?Set SPARKLE_PUBLIC_ED_KEY to your Sparkle EdDSA public key before releasing.}"
+SPARKLE_ACCOUNT="${SPARKLE_ACCOUNT:-ipop.ai}"
 
 # Sparkle tools (auto-discovered from Xcode's SPM cache)
 SPARKLE_BIN=$(find ~/Library/Developer/Xcode/DerivedData/leanring-buddy*/SourcePackages/artifacts/sparkle/Sparkle/bin -maxdepth 0 2>/dev/null | head -1)
@@ -155,7 +154,6 @@ xcodebuild archive \
     CURRENT_PROJECT_VERSION="${BUILD_NUMBER}" \
     PRODUCT_BUNDLE_IDENTIFIER="ai.ipop.mac" \
     PRODUCT_NAME="${APP_NAME}" \
-    SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY}" \
     2>&1 | tail -5
 
 echo "✅ Archive created"
@@ -226,7 +224,7 @@ echo "✅ DMG notarized and stapled"
 # ── Step 6: Sign DMG with Sparkle EdDSA key ─────────────────────────────────
 
 echo "🔐 Signing DMG with Sparkle EdDSA key..."
-"${SPARKLE_BIN}/sign_update" "${DMG_PATH}"
+"${SPARKLE_BIN}/sign_update" --account "${SPARKLE_ACCOUNT}" "${DMG_PATH}"
 
 # ── Step 7: Generate / update appcast.xml ────────────────────────────────────
 # generate_appcast reads all DMGs in the releases/ directory, extracts version
@@ -236,6 +234,7 @@ echo "🔐 Signing DMG with Sparkle EdDSA key..."
 
 echo "📡 Generating appcast.xml..."
 "${SPARKLE_BIN}/generate_appcast" \
+    --account "${SPARKLE_ACCOUNT}" \
     --download-url-prefix "https://github.com/${GITHUB_REPO}/releases/download/${TAG}/" \
     -o "${PROJECT_DIR}/appcast.xml" \
     "${RELEASES_DIR}"
