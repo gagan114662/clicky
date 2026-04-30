@@ -74,16 +74,16 @@ final class CompanionManager: ObservableObject {
     private lazy var claudeAPI: any AnthropicChatClient = {
         // Use the claude CLI subprocess so no separate Anthropic API key is needed.
         if ClaudeCodeCLIClient.isAvailable() {
-            print("✅ Using Claude Code CLI subprocess for responses")
+            FileLogger.log("✅ Using Claude Code CLI subprocess for responses")
             return ClaudeCodeCLIClient(model: selectedModel)
         }
 
         if let proxyURL = Self.configuredClaudeProxyURL() {
-            print("⚠️ Claude Code CLI not found — using configured Worker proxy")
+            FileLogger.log("⚠️ Claude Code CLI not found — using configured Worker proxy")
             return ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel)
         }
 
-        print("⚠️ Claude Code CLI not found and no Worker proxy configured — using Claude Code OAuth direct API")
+        FileLogger.log("⚠️ Claude Code CLI not found and no Worker proxy configured — using Claude Code OAuth direct API")
         return ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel)
     }()
 
@@ -129,6 +129,7 @@ final class CompanionManager: ObservableObject {
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
+    private var currentTurnStartDate: Date?
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
@@ -150,12 +151,29 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    @Published var selectedModel: String = Self.initialSelectedModel()
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
+        UserDefaults.standard.set(true, forKey: "hasExplicitlySelectedClaudeModel")
         claudeAPI.model = model
+    }
+
+    private static func initialSelectedModel() -> String {
+        let defaults = UserDefaults.standard
+        let fastModel = "claude-haiku-4-5-20251001"
+        guard let storedModel = defaults.string(forKey: "selectedClaudeModel") else {
+            return fastModel
+        }
+        // Migrate the old launch default from Sonnet to Fast. If the user picks
+        // Sonnet from the menu after this build, the explicit-selection flag
+        // preserves that choice.
+        if storedModel == "claude-sonnet-4-6",
+           defaults.bool(forKey: "hasExplicitlySelectedClaudeModel") == false {
+            return fastModel
+        }
+        return storedModel
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -601,7 +619,7 @@ final class CompanionManager: ObservableObject {
                     },
                     submitDraftText: { [weak self] finalTranscript in
                         self?.lastTranscript = finalTranscript
-                        print("🗣️ Companion received transcript: \(finalTranscript)")
+                        FileLogger.log("🗣️ Companion received transcript: \(finalTranscript)")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
                         self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                     }
@@ -645,6 +663,12 @@ final class CompanionManager: ObservableObject {
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
+
+    mac actions:
+    when the user asks you to do something on their mac, emit action tags instead of only talking. tags execute in order:
+    [OPEN_APP:Notes], [QUIT_APP:Safari], [CLICK:File], [TYPE:hello], [KEY:cmd+s], [SCROLL:down].
+    for example, if they say "make a note about pasta tonight", respond with [OPEN_APP:Notes] [KEY:cmd+n] [TYPE:pasta tonight].
+    keep any spoken words short; if the tags fully do the task, you can output only tags.
 
     element pointing:
     you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
@@ -741,6 +765,39 @@ final class CompanionManager: ObservableObject {
         return true
     }
 
+    private func routeTranscriptToLocalIntentIfNeeded(_ transcript: String) async -> Bool {
+        let localIntent = LocalIntentRouter.route(transcript: transcript)
+        guard localIntent != .unmatched else {
+            FileLogger.log("🎯 LocalIntentRouter: unmatched (transcript: \"\(transcript)\") — falling to Claude")
+            return false
+        }
+
+        FileLogger.log("🎯 LocalIntentRouter matched: \(localIntent) (transcript: \"\(transcript)\")")
+        switch await LocalIntentExecutor.execute(localIntent) {
+        case .succeeded(let spokenAcknowledgement):
+            let assistantResponse = spokenAcknowledgement.isEmpty
+                ? "(executed: \(localIntent))"
+                : spokenAcknowledgement
+            conversationHistory.append((userTranscript: transcript, assistantResponse: assistantResponse))
+            if conversationHistory.count > 10 {
+                conversationHistory.removeFirst(conversationHistory.count - 10)
+            }
+            memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: assistantResponse)
+
+            if !spokenAcknowledgement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                speakWithMacOSVoice(spokenAcknowledgement)
+                voiceState = .responding
+            } else {
+                voiceState = .idle
+            }
+            scheduleTransientHideIfNeeded()
+            return true
+        case .failed(let reason):
+            FileLogger.log("⚠️ LocalIntent fell through: \(reason)")
+            return false
+        }
+    }
+
     // MARK: - AI Response Pipeline
 
     /// Captures a screenshot, sends it along with the transcript to Claude,
@@ -757,14 +814,21 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = Task {
             // Stay in processing (spinner) state — no streaming text displayed
             voiceState = .processing
+            currentTurnStartDate = Date()
+            logPipelinePhase("turn started")
 
             do {
                 if await routeTranscriptToCodexIfNeeded(transcript) {
                     return
                 }
 
+                if await routeTranscriptToLocalIntentIfNeeded(transcript) {
+                    return
+                }
+
                 // Capture all connected screens so the AI has full context
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                logPipelinePhase("screenshots captured (\(screenCaptures.count))")
 
                 guard !Task.isCancelled else { return }
 
@@ -791,21 +855,41 @@ final class CompanionManager: ObservableObject {
                     return transcript
                 }()
 
+                var didReceiveFirstChunk = false
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: companionVoiceResponseSystemPromptWithMemory,
                     conversationHistory: historyForAPI,
                     userPrompt: userPromptWithAppContext,
-                    onTextChunk: { _ in
+                    onTextChunk: { [weak self] _ in
                         // No streaming text display — spinner stays until TTS plays
+                        if !didReceiveFirstChunk {
+                            didReceiveFirstChunk = true
+                            self?.logPipelinePhase("first stream chunk")
+                        }
                     }
                 )
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-                let spokenText = parseResult.spokenText
+                logPipelinePhase("stream complete (\(fullResponseText.count) chars)")
+                FileLogger.log("📝 Claude raw response:\n  ┌─\n  │ \(fullResponseText.replacingOccurrences(of: "\n", with: "\n  │ "))\n  └─")
+
+                // Parse pointing plus native action tags, then execute actions.
+                let compoundResult = ActionTagParser.parseAllActionTags(from: fullResponseText)
+                FileLogger.log("📝 Parsed \(compoundResult.actions.count) action tags from response")
+                let parseResult = compoundResult.pointResult
+                let spokenText = compoundResult.spokenText
+
+                for action in compoundResult.actions {
+                    let executionResult = await LocalIntentExecutor.execute(action)
+                    switch executionResult {
+                    case .succeeded:
+                        FileLogger.log("⚡️ Claude action executed: \(action)")
+                    case .failed(let reason):
+                        FileLogger.log("⚠️ Claude action failed: \(action) — \(reason)")
+                    }
+                }
 
                 // Handle element pointing if Claude returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
@@ -940,6 +1024,16 @@ final class CompanionManager: ObservableObject {
     private func speakCreditsErrorFallback() {
         speakWithMacOSVoice("Sorry, something went wrong. Please try again.")
         voiceState = .responding
+    }
+
+    private func logPipelinePhase(_ phaseName: String) {
+        let elapsedMs: Int
+        if let currentTurnStartDate {
+            elapsedMs = Int(Date().timeIntervalSince(currentTurnStartDate) * 1000)
+        } else {
+            elapsedMs = 0
+        }
+        FileLogger.log("⏱️ [+\(elapsedMs)ms] \(phaseName)")
     }
 
     /// Speaks text via `/usr/bin/say` in a separate process so it cannot
