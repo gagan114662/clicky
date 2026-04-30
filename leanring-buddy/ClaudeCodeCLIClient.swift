@@ -26,6 +26,66 @@ enum ClaudeCodeCLIError: Error, LocalizedError {
     }
 }
 
+private final class ClaudeCodeCLIStreamState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasResumed = false
+    private var accumulatedResponseText = ""
+    private var lineBuffer = ""
+
+    func appendStdoutChunk(_ chunk: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        lineBuffer += chunk
+        var snapshots: [String] = []
+
+        while let newlineIndex = lineBuffer.firstIndex(of: "\n") {
+            let line = String(lineBuffer[lineBuffer.startIndex..<newlineIndex])
+            lineBuffer = String(lineBuffer[lineBuffer.index(after: newlineIndex)...])
+
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let lineData = trimmed.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let eventType = event["type"] as? String
+            else { continue }
+
+            if eventType == "assistant",
+               let message = event["message"] as? [String: Any],
+               let contentArray = message["content"] as? [[String: Any]] {
+                let deltaText = contentArray.compactMap { block -> String? in
+                    guard block["type"] as? String == "text" else { return nil }
+                    return block["text"] as? String
+                }.joined()
+
+                if !deltaText.isEmpty {
+                    accumulatedResponseText += deltaText
+                    snapshots.append(accumulatedResponseText)
+                }
+            }
+
+            if eventType == "result",
+               accumulatedResponseText.isEmpty,
+               let resultText = event["result"] as? String,
+               !resultText.isEmpty {
+                accumulatedResponseText = resultText
+                snapshots.append(resultText)
+            }
+        }
+
+        return snapshots
+    }
+
+    func finishIfNeeded() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !hasResumed else { return nil }
+        hasResumed = true
+        return accumulatedResponseText
+    }
+}
+
 /// Calls the claude CLI subprocess using the user's Claude Code subscription.
 /// Supports vision (screenshots passed as base64 JSON) and streaming output.
 final class ClaudeCodeCLIClient: AnthropicChatClient {
@@ -138,59 +198,21 @@ final class ClaudeCodeCLIClient: AnthropicChatClient {
         stdinPipe.fileHandleForWriting.closeFile()
 
         return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
-            var accumulatedResponseText = ""
-            var lineBuffer = ""
+            let streamState = ClaudeCodeCLIStreamState()
 
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
 
-                lineBuffer += chunk
-
-                // Process every complete newline-terminated JSON event
-                while let newlineIndex = lineBuffer.firstIndex(of: "\n") {
-                    let line = String(lineBuffer[lineBuffer.startIndex..<newlineIndex])
-                    lineBuffer = String(lineBuffer[lineBuffer.index(after: newlineIndex)...])
-
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty,
-                          let lineData = trimmed.data(using: .utf8),
-                          let event = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let eventType = event["type"] as? String
-                    else { continue }
-
-                    // assistant events carry partial or complete response text
-                    if eventType == "assistant",
-                       let message = event["message"] as? [String: Any],
-                       let contentArray = message["content"] as? [[String: Any]] {
-                        let deltaText = contentArray.compactMap { block -> String? in
-                            guard block["type"] as? String == "text" else { return nil }
-                            return block["text"] as? String
-                        }.joined()
-
-                        if !deltaText.isEmpty {
-                            accumulatedResponseText += deltaText
-                            let snapshot = accumulatedResponseText
-                            Task { @MainActor in await onTextChunk(snapshot) }
-                        }
-                    }
-
-                    // result event: fall back to its "result" field if we got no streaming text
-                    if eventType == "result",
-                       accumulatedResponseText.isEmpty,
-                       let resultText = event["result"] as? String,
-                       !resultText.isEmpty {
-                        accumulatedResponseText = resultText
-                        Task { @MainActor in await onTextChunk(resultText) }
-                    }
+                let snapshots = streamState.appendStdoutChunk(chunk)
+                for snapshot in snapshots {
+                    Task { @MainActor in onTextChunk(snapshot) }
                 }
             }
 
             process.terminationHandler = { terminatedProcess in
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                guard !resumed else { return }
-                resumed = true
+                guard let accumulatedResponseText = streamState.finishIfNeeded() else { return }
 
                 let duration = Date().timeIntervalSince(startTime)
                 if accumulatedResponseText.isEmpty {

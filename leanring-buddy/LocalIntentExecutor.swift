@@ -70,11 +70,9 @@ enum LocalIntentExecutor {
             return .succeeded(spokenAcknowledgement: "")
         }
 
-        // Disk lookup. `fullPath(forApplication:)` is technically deprecated
-        // but is the only by-name lookup that works without a bundle ID.
         for candidate in casingCandidates(for: requestedName) {
-            if let appPath = NSWorkspace.shared.fullPath(forApplication: candidate) {
-                return await launchAppAt(URL(fileURLWithPath: appPath), label: candidate)
+            if let appURL = installedApplicationURL(named: candidate) {
+                return await launchAppAt(appURL, label: candidate)
             }
         }
 
@@ -82,9 +80,9 @@ enum LocalIntentExecutor {
         // ("feeform" instead of "Freeform"). Search the installed-app cache
         // for the closest match within a tight Levenshtein distance.
         if let fuzzyMatch = closestInstalledAppName(to: requestedName),
-           let appPath = NSWorkspace.shared.fullPath(forApplication: fuzzyMatch) {
+           let appURL = installedApplicationURL(named: fuzzyMatch) {
             FileLogger.log("🔍 LocalIntent: fuzzy-matched \"\(requestedName)\" → \"\(fuzzyMatch)\"")
-            return await launchAppAt(URL(fileURLWithPath: appPath), label: fuzzyMatch)
+            return await launchAppAt(appURL, label: fuzzyMatch)
         }
 
         return .failed(reason: "no app named \(requestedName) found")
@@ -142,18 +140,17 @@ enum LocalIntentExecutor {
     /// per process and caches the list. Used for fuzzy name matching when
     /// the user's spoken app name doesn't exactly match what's installed.
     private static let installedAppNamesCache: [String] = {
-        let appDirectories = [
-            "/Applications",
-            "/System/Applications",
-            "/System/Applications/Utilities",
-            NSHomeDirectory() + "/Applications",
-        ]
+        let appDirectories = installedApplicationDirectories
         let fileManager = FileManager.default
         var collectedAppNames: Set<String> = []
-        for directory in appDirectories {
-            guard let entries = try? fileManager.contentsOfDirectory(atPath: directory) else { continue }
-            for entry in entries where entry.hasSuffix(".app") {
-                let appName = String(entry.dropLast(".app".count))
+        for directoryURL in appDirectories {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for entryURL in entries where entryURL.pathExtension == "app" {
+                let appName = entryURL.deletingPathExtension().lastPathComponent
                 if !appName.isEmpty {
                     collectedAppNames.insert(appName)
                 }
@@ -162,6 +159,34 @@ enum LocalIntentExecutor {
         return collectedAppNames.sorted()
     }()
 
+    private static let installedApplicationDirectories: [URL] = [
+        URL(fileURLWithPath: "/Applications"),
+        URL(fileURLWithPath: "/System/Applications"),
+        URL(fileURLWithPath: "/System/Applications/Utilities"),
+        URL(fileURLWithPath: NSHomeDirectory() + "/Applications"),
+    ]
+
+    private static func installedApplicationURL(named requestedName: String) -> URL? {
+        let normalizedRequestedName = requestedName.lowercased()
+        let fileManager = FileManager.default
+
+        for directoryURL in installedApplicationDirectories {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for entryURL in entries where entryURL.pathExtension == "app" {
+                let appName = entryURL.deletingPathExtension().lastPathComponent
+                if appName.lowercased() == normalizedRequestedName {
+                    return entryURL
+                }
+            }
+        }
+
+        return nil
+    }
     /// Finds the installed app whose name is closest to `requestedName`,
     /// returning nil if no app is within the acceptable similarity bound.
     /// Tunable: ~30% character distance is generous enough for ASR typos

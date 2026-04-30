@@ -140,7 +140,7 @@ struct AgentSiblingsContainerView: View {
                 onSessionsEmpty()
             }
         }
-        .onChange(of: sessionManager.sessions.count) { count in
+        .onChange(of: sessionManager.sessions.count) { _, count in
             if count == 0 {
                 onSessionsEmpty()
             }

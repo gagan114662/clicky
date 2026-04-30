@@ -280,7 +280,7 @@ struct AgentSessionDetailView: View {
         ScrollView {
             ScrollViewReader { proxy in
                 outputAreaContent
-                    .onChange(of: session.liveOutput) { _ in
+                    .onChange(of: session.liveOutput) { _, _ in
                         withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo("output", anchor: .bottom)
                         }
