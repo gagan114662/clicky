@@ -72,18 +72,22 @@ final class CompanionManager: ObservableObject {
     // streamingResponseText, so no separate response overlay manager is needed.
 
     private lazy var claudeAPI: any AnthropicChatClient = {
-        // Use the claude CLI subprocess so no separate Anthropic API key is needed.
-        if ClaudeCodeCLIClient.isAvailable() {
-            FileLogger.log("✅ Using Claude Code CLI subprocess for responses")
-            return ClaudeCodeCLIClient(model: selectedModel)
-        }
-
         if let proxyURL = Self.configuredClaudeProxyURL() {
-            FileLogger.log("⚠️ Claude Code CLI not found — using configured Worker proxy")
+            FileLogger.log("✅ Using Claude API Worker proxy for responses")
             return ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel)
         }
 
-        FileLogger.log("⚠️ Claude Code CLI not found and no Worker proxy configured — using Claude Code OAuth direct API")
+        if ClaudeCodeOAuthProvider.isAvailable() {
+            FileLogger.log("✅ Using Claude Code OAuth direct API for responses")
+            return ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel)
+        }
+
+        if ClaudeCodeCLIClient.isAvailable() {
+            FileLogger.log("⚠️ Claude API credentials unavailable — using Claude Code CLI subprocess fallback")
+            return ClaudeCodeCLIClient(model: selectedModel)
+        }
+
+        FileLogger.log("⚠️ No Claude API proxy, OAuth token, or CLI found — using Claude Code OAuth direct API and surfacing auth errors")
         return ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel)
     }()
 
@@ -647,6 +651,13 @@ final class CompanionManager: ObservableObject {
         memoryCacheSystemPromptBlock + Self.companionVoiceResponseSystemPrompt
     }
 
+    private var textOnlyVoiceResponseSystemPromptWithMemory: String {
+        memoryCacheSystemPromptBlock + Self.companionVoiceResponseSystemPrompt + """
+
+        this turn does not include a screenshot. answer from the user's words, memory, and conversation context only. do not claim you can see the screen. end with [POINT:none].
+        """
+    }
+
     private static let companionVoiceResponseSystemPrompt = """
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
@@ -687,6 +698,58 @@ final class CompanionManager: ObservableObject {
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
+
+    nonisolated static func shouldCaptureScreenForTranscript(_ transcript: String) -> Bool {
+        let lower = transcript
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !lower.isEmpty else { return false }
+
+        let visualPhrases = [
+            "on my screen", "on the screen", "on screen",
+            "what do you see", "what can you see", "what's on",
+            "what is on", "look at", "look over", "take a look",
+            "do you see", "can you see", "this screen",
+            "this page", "this window", "this app", "this error",
+            "this code", "this file", "this button", "this menu",
+            "that button", "that menu", "that window",
+            "point at", "point to", "show me where",
+            "where is", "where's", "which button", "which menu",
+        ]
+        if visualPhrases.contains(where: { lower.contains($0) }) {
+            return true
+        }
+
+        let words = Set(
+            lower
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map(String.init)
+        )
+        let visualWords: Set<String> = [
+            "screen", "screenshot", "visible", "shown", "looking",
+            "cursor", "pointer", "button", "menu", "icon", "tab",
+            "window", "panel", "sidebar", "toolbar", "dialog",
+            "xcode", "chrome", "safari", "browser", "page",
+            "click", "tap", "select", "navigate", "scroll",
+        ]
+        if !words.isDisjoint(with: visualWords) {
+            return true
+        }
+
+        let textOnlyPrefixes = [
+            "what is", "what's", "who is", "who's", "why",
+            "how do i", "how can i", "how should i",
+            "explain", "define", "tell me about", "teach me",
+            "brainstorm", "write", "draft", "rewrite", "summarize",
+            "should i", "help me think", "give me ideas",
+        ]
+        if textOnlyPrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return false
+        }
+
+        let deicticWords: Set<String> = ["this", "that", "these", "those", "here"]
+        return !words.isDisjoint(with: deicticWords)
+    }
 
     private func routeTranscriptToCodexIfNeeded(_ transcript: String) async -> Bool {
         // Route to Codex before screenshot capture. Agent tasks do not need
@@ -826,18 +889,29 @@ final class CompanionManager: ObservableObject {
                     return
                 }
 
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-                logPipelinePhase("screenshots captured (\(screenCaptures.count))")
+                let shouldCaptureScreen = Self.shouldCaptureScreenForTranscript(transcript)
+                let screenCaptures: [CompanionScreenCapture]
+                let labeledImages: [(data: Data, label: String)]
+                if shouldCaptureScreen {
+                    // Capture all connected screens only when the transcript
+                    // actually needs visual context. Vision turns are much
+                    // slower and send a lot more data to Claude.
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                    logPipelinePhase("screenshots captured (\(screenCaptures.count))")
 
-                guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled else { return }
 
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    // Build image labels with the actual screenshot pixel dimensions
+                    // so Claude's coordinate space matches the image it sees. We
+                    // scale from screenshot pixels to display points ourselves.
+                    labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+                } else {
+                    screenCaptures = []
+                    labeledImages = []
+                    logPipelinePhase("text-only turn (no screenshot)")
                 }
 
                 // Pass conversation history so Claude remembers prior exchanges
@@ -858,7 +932,9 @@ final class CompanionManager: ObservableObject {
                 var didReceiveFirstChunk = false
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
-                    systemPrompt: companionVoiceResponseSystemPromptWithMemory,
+                    systemPrompt: shouldCaptureScreen
+                        ? companionVoiceResponseSystemPromptWithMemory
+                        : textOnlyVoiceResponseSystemPromptWithMemory,
                     conversationHistory: historyForAPI,
                     userPrompt: userPromptWithAppContext,
                     onTextChunk: { [weak self] _ in

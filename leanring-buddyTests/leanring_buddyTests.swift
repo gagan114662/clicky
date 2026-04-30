@@ -83,10 +83,26 @@ struct leanring_buddyTests {
         #expect(intent == .launchOrActivateApp(name: "freeform"))
     }
 
+    @Test func localIntentCreatesNotesWithoutClaudeRoundTrip() async throws {
+        let intent = LocalIntentRouter.route(transcript: "Um, go on my Notes app and make a note for me to make pasta tonight.")
+
+        #expect(intent == .createNote(text: "make pasta tonight"))
+    }
+
     @Test func localIntentRoutesBareContinuationToClickTarget() async throws {
         let intent = LocalIntentRouter.route(transcript: "to the Apple icon.")
 
         #expect(intent == .clickByName(targetName: "apple"))
+    }
+
+    @Test func generalQuestionsSkipScreenshotCapture() async throws {
+        #expect(!CompanionManager.shouldCaptureScreenForTranscript("What is HTML?"))
+        #expect(!CompanionManager.shouldCaptureScreenForTranscript("Brainstorm pricing ideas for ipop."))
+    }
+
+    @Test func screenQuestionsKeepScreenshotCapture() async throws {
+        #expect(CompanionManager.shouldCaptureScreenForTranscript("What is on my screen?"))
+        #expect(CompanionManager.shouldCaptureScreenForTranscript("How do I fix this error in Xcode?"))
     }
 
     @Test func actionOnlyResponseHasNoSpokenWhitespace() async throws {

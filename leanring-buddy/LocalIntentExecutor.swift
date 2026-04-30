@@ -32,6 +32,8 @@ enum LocalIntentExecutor {
             return await launchOrActivateApp(named: name)
         case .quitApp(let name):
             return quitApp(named: name)
+        case .createNote(let text):
+            return await createNote(text: text)
         case .clickByName(let name):
             // Brief settle pause so click lands AFTER any preceding launch
             // has actually focused its window. Cheap insurance for chains.
@@ -52,6 +54,22 @@ enum LocalIntentExecutor {
         case .unmatched:
             return .failed(reason: "no local intent matched")
         }
+    }
+
+    private static func createNote(text: String) async -> ExecutionResult {
+        let launchResult = await launchOrActivateApp(named: "Notes")
+        guard case .succeeded = launchResult else { return launchResult }
+
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        let newNoteResult = pressKeyChord("cmd+n")
+        guard case .succeeded = newNoteResult else { return newNoteResult }
+
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        let typeResult = typeText(text)
+        if case .succeeded = typeResult {
+            FileLogger.log("⚡️ LocalIntent: create note \"\(text.prefix(80))\(text.count > 80 ? "…" : "")\"")
+        }
+        return typeResult
     }
 
     // MARK: - App launch / activate
