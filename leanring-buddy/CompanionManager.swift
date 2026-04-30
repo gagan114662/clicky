@@ -64,6 +64,7 @@ final class CompanionManager: ObservableObject {
     /// Process running `/usr/bin/say` for TTS fallback. Kept so we can
     /// terminate it when a new response starts before the old one finishes.
     private var macOSSpeechProcess: Process?
+    private var elevenLabsSpeechTask: Task<Void, Never>?
     private static let defaultMacOSVoiceName = "Samantha"
     private static let defaultMacOSVoiceRate = 178
 
@@ -614,6 +615,8 @@ final class CompanionManager: ObservableObject {
             // otherwise the old voice keeps droning until the next Claude
             // response arrives, which can briefly overlap with the new reply.
             currentResponseTask?.cancel()
+            elevenLabsSpeechTask?.cancel()
+            elevenLabsSpeechTask = nil
             elevenLabsTTSClient.stopPlayback()
             macOSSpeechProcess?.terminate()
             macOSSpeechProcess = nil
@@ -813,7 +816,7 @@ final class CompanionManager: ObservableObject {
         let acknowledgment = parallelTasks.count > 1
             ? "On it. Spawning \(parallelTasks.count) agents."
             : "On it."
-        speakWithMacOSVoice(acknowledgment)
+        speakWithPreferredVoice(acknowledgment)
         scheduleTransientHideIfNeeded()
 
         // Launch one sibling per task — they all run in parallel.
@@ -837,7 +840,7 @@ final class CompanionManager: ObservableObject {
                 let confirmation = isMultiTask
                     ? "Task \(taskIndex + 1) ready."
                     : "Done."
-                self.speakWithMacOSVoice(confirmation)
+                self.speakWithPreferredVoice(confirmation)
                 if !self.agentSessionManager.hasAnySessions {
                     self.agentSiblingsWindowManager.hide()
                     self.agentSessionDetailWindowManager.hide()
@@ -867,7 +870,7 @@ final class CompanionManager: ObservableObject {
             memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: assistantResponse)
 
             if !spokenAcknowledgement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                speakWithMacOSVoice(spokenAcknowledgement)
+                speakWithPreferredVoice(spokenAcknowledgement)
                 voiceState = .responding
             } else {
                 voiceState = .idle
@@ -889,6 +892,8 @@ final class CompanionManager: ObservableObject {
     /// the buddy to fly to that element on screen.
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
+        elevenLabsSpeechTask?.cancel()
+        elevenLabsSpeechTask = nil
         elevenLabsTTSClient.stopPlayback()
         macOSSpeechProcess?.terminate()
         macOSSpeechProcess = nil
@@ -1060,12 +1065,10 @@ final class CompanionManager: ObservableObject {
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
-                // Play the response via TTS using macOS say command.
-                // ElevenLabs requires a paid plan for API access, so we use
-                // the system say command which runs in a separate process and
-                // cannot conflict with AVAudioEngine used for mic capture.
+                // Prefer ElevenLabs when configured; fall back to macOS say so
+                // a missing key never blocks the interaction.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    speakWithMacOSVoice(spokenText)
+                    speakWithPreferredVoice(spokenText)
                     voiceState = .responding
                 }
             } catch is CancellationError {
@@ -1117,7 +1120,7 @@ final class CompanionManager: ObservableObject {
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
     private func speakCreditsErrorFallback() {
-        speakWithMacOSVoice("Sorry, something went wrong. Please try again.")
+        speakWithPreferredVoice("Sorry, something went wrong. Please try again.")
         voiceState = .responding
     }
 
@@ -1133,6 +1136,40 @@ final class CompanionManager: ObservableObject {
 
     /// Speaks text via `/usr/bin/say` in a separate process so it cannot
     /// conflict with the app's AVAudioEngine (used for microphone capture).
+    private func speakWithPreferredVoice(_ text: String) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+
+        macOSSpeechProcess?.terminate()
+        macOSSpeechProcess = nil
+        elevenLabsSpeechTask?.cancel()
+        elevenLabsSpeechTask = nil
+
+        guard elevenLabsTTSClient.isConfigured else {
+            FileLogger.log("🔊 ElevenLabs not configured — using macOS voice fallback")
+            speakWithMacOSVoice(trimmedText)
+            return
+        }
+
+        elevenLabsSpeechTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.elevenLabsTTSClient.speakText(trimmedText)
+                if !Task.isCancelled {
+                    self.elevenLabsSpeechTask = nil
+                }
+            } catch is CancellationError {
+                // User interrupted playback.
+            } catch {
+                guard !Task.isCancelled else { return }
+                ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+                FileLogger.log("⚠️ ElevenLabs TTS failed: \(error.localizedDescription) — using macOS fallback")
+                self.speakWithMacOSVoice(trimmedText)
+                self.elevenLabsSpeechTask = nil
+            }
+        }
+    }
+
     private func speakWithMacOSVoice(_ text: String) {
         macOSSpeechProcess?.terminate()
         let process = Process()
