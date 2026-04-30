@@ -72,6 +72,11 @@ final class CompanionManager: ObservableObject {
     // streamingResponseText, so no separate response overlay manager is needed.
 
     private lazy var claudeAPI: any AnthropicChatClient = {
+        if let zaiClient = ZAIChatClient.configuredIfEnabled(selectedModel: selectedModel) {
+            FileLogger.log("✅ Using Z.ai direct API for responses")
+            return zaiClient
+        }
+
         if let proxyURL = Self.configuredClaudeProxyURL() {
             FileLogger.log("✅ Using Claude API Worker proxy for responses")
             return ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel)
