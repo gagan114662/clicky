@@ -14,7 +14,7 @@ API keys should live on a Cloudflare Worker proxy or local development-only cred
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
+- **AI Chat**: Claude model picker (Fast/Sonnet/Opus) through the provider chain. Default path is Claude via Cloudflare Worker proxy, Claude Code OAuth, or Claude CLI; local development can explicitly opt into Z.ai with `AIProvider=zai` / `IPOP_AI_PROVIDER=zai` (see `docs/zai-provider.md`). The panel shows the active provider at runtime.
 - **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
 - **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
@@ -53,9 +53,9 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~2672 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, overlay management, agent routing, runtime/model display, and mission context delivery. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~1385 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker, permissions UI, mission dashboard/status grid/proof log/approval gates, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -76,12 +76,19 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `MemoryManager.swift` | ~291 | Persistent memory across sessions. Writes facts to `~/.ipop-ai/memory.md` + `user.md`, persists last 20 exchanges to `history.json`. Background Claude extraction after each turn via ClaudeCodeCLIClient. |
+| `AgentSafetyClassifier.swift` | ~263 | Safety gate for shell, text-editor, and computer-use actions. Blocks destructive operations, confirms sends/submits/deletes, and permits named Upwork submission buttons only when mission context carries standing approval. |
+| `AgentConfirmationPanelView.swift` | ~91 | Approve/edit/cancel confirmation panel for risky agent actions. Lets the user revise an approval request so the current action batch stops and the agent follows the edited instruction. |
+| `ComputerUseAgent.swift` | ~574 | Mac computer-use loop driven through action tags. Captures screenshots, asks the active chat provider for actions, executes native/pixel/file/shell tools, logs proof/action traces, and respects confirmation/edit/standing-approval gates. |
+| `SuperAppMissionControl.swift` | ~2690 | Outcome-planning layer for agent mode. Detects target apps, risk, automation intent, Upwork pipeline and proof-first Fast Cash workflows, dashboard metrics/proof logs/approval chips, standing submission approval, Upwork application records/follow-ups/earnings proof, task memory, and mission system context. |
+| `TeacherModeController.swift` | ~1483 | Teacher Mode lesson state controller. Builds lesson prompts, routes local teaching moves, tracks confusion/mastery/lesson phase, and keeps learning turns isolated from generic chat history. |
+| `TeacherQualityLoop.swift` | ~805 | Teacher Mode quality loop. Scores teaching moves, repairs weak explanations, tracks mastery and lesson arc state, and generates curriculum milestones/diagnostic questions for repeated "aha" turns. |
 | `AgentSession.swift` | ~50 | Data model for a single Codex agent task. Holds task description, triangle color (from a 6-color palette), status (running/completed/failed), result, live output, and Codex thread ID. |
 | `AgentSessionManager.swift` | ~300 | Manages multiple concurrent Codex agent sessions (the "siblings") on the shared `codex app-server`. Publishes live output, supports follow-ups, interrupts running turns, archives closed threads, and keeps completed sessions inspectable before cleanup. |
 | `AgentSiblingsOverlayWindow.swift` | ~250 | Floating NSPanel showing "mini ipop.ai siblings" — one dark rounded square icon per agent, with colored triangle + status dot. Non-activating, stays on all Spaces. Click opens session details; long-press dismisses/stops a session. |
 | `AgentSessionDetailWindow.swift` | ~260 | Click-to-inspect floating panel for a Codex sibling. Shows task status, live streamed output, and follow-up composer. |
 | `CodexAppServerClient.swift` | ~600 | Long-lived JSON-RPC client for `codex app-server`. Starts threads, streams events, interrupts turns, archives threads, and kills the server process tree on app exit or parent-process disappearance. |
 | `CodexCLIClient.swift` | ~760 | Legacy/fallback Codex CLI client and transcript classifier for agent tasks. Parses JSONL, captures stderr, closes stdin to avoid hangs, supports parallel task decomposition and follow-up execution. |
+| `scripts/live-eval-runner.swift` | ~567 | Manual live-eval harness. Injects debug transcripts into an Xcode DEBUG app, captures before/after screenshots, frontmost screen text, case log slices, action traces, metadata, and markdown reports. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
 ## Build & Run
@@ -152,6 +159,7 @@ IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
 - Do not try to fix the known non-blocking warnings (Swift 6 concurrency, deprecated onChange)
 - Do not rename the project directory or scheme (the "leanring" typo is intentional/legacy)
 - Do not run `xcodebuild` from the terminal — it invalidates TCC permissions
+- In Upwork Fast Cash flows, do not pursue Zoom/call/meeting-only jobs or no-artifact jobs. Only submit under standing approval when visible public material lets iPOP do useful pre-application work first; keep final private deliverables behind a funded Upwork milestone or active contract.
 
 ## Git Workflow
 

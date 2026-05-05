@@ -5,9 +5,11 @@
 //  Created by thorfinn on 3/2/26.
 //
 
+import Foundation
 import Testing
-@testable import leanring_buddy
+@testable import ipop_ai
 
+@MainActor
 struct leanring_buddyTests {
 
     @Test func firstPermissionRequestUsesSystemPromptOnly() async throws {
@@ -141,10 +143,18 @@ struct leanring_buddyTests {
         #expect(intent == .launchOrActivateApp(name: "freeform"))
     }
 
-    @Test func localIntentCreatesNotesWithoutClaudeRoundTrip() async throws {
+    @Test func localIntentDoesNotSilentlyCreateNotes() async throws {
         let intent = LocalIntentRouter.route(transcript: "Um, go on my Notes app and make a note for me to make pasta tonight.")
 
-        #expect(intent == .createNote(text: "make pasta tonight"))
+        #expect(intent == .unmatched)
+    }
+
+    @Test func calendarCreationDoesNotRouteToCodexSibling() async throws {
+        #expect(!CodexCLIClient.isAgentTask("Create a calendar event tomorrow at 3 PM called iPOP live eval."))
+    }
+
+    @Test func xcodeFixStillRoutesToCodexSibling() async throws {
+        #expect(CodexCLIClient.isAgentTask("Fix this Xcode error in the project and rerun the relevant checks."))
     }
 
     @Test func localIntentRoutesBareContinuationToClickTarget() async throws {

@@ -28,6 +28,17 @@ enum CompanionScreenCaptureUtility {
     /// whether the user's cursor is on that screen. This gives the AI
     /// full context across multiple monitors.
     static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
+        try await captureScreensAsJPEG(onlyCursorScreen: false)
+    }
+
+    /// Captures only the screen currently containing the cursor. Teacher Mode
+    /// uses this first so it can start the lesson quickly, then captures more
+    /// context only if the learning surface needs it.
+    static func captureCursorScreenAsJPEG() async throws -> [CompanionScreenCapture] {
+        try await captureScreensAsJPEG(onlyCursorScreen: true)
+    }
+
+    private static func captureScreensAsJPEG(onlyCursorScreen: Bool) async throws -> [CompanionScreenCapture] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard !content.displays.isEmpty else {
@@ -57,8 +68,16 @@ enum CompanionScreenCaptureUtility {
             }
         }
 
-        // Sort displays so the cursor screen is always first
-        let sortedDisplays = content.displays.sorted { displayA, displayB in
+        let liveDisplays = content.displays.filter { display in
+            nsScreenByDisplayID[display.displayID] != nil
+        }
+        let capturableDisplays = liveDisplays.isEmpty ? content.displays : liveDisplays
+        if capturableDisplays.count < content.displays.count {
+            print("🖥️ Screenshot: skipped \(content.displays.count - capturableDisplays.count) stale display(s)")
+        }
+
+        // Sort displays so the cursor screen is always first.
+        let sortedDisplays = capturableDisplays.sorted { displayA, displayB in
             let frameA = nsScreenByDisplayID[displayA.displayID]?.frame ?? displayA.frame
             let frameB = nsScreenByDisplayID[displayB.displayID]?.frame ?? displayB.frame
             let aContainsCursor = frameA.contains(mouseLocation)
@@ -66,10 +85,20 @@ enum CompanionScreenCaptureUtility {
             if aContainsCursor != bContainsCursor { return aContainsCursor }
             return false
         }
+        let displaysToCapture: [SCDisplay]
+        if onlyCursorScreen,
+           let cursorDisplay = sortedDisplays.first(where: { display in
+               let frame = nsScreenByDisplayID[display.displayID]?.frame ?? display.frame
+               return frame.contains(mouseLocation)
+           }) {
+            displaysToCapture = [cursorDisplay]
+        } else {
+            displaysToCapture = sortedDisplays
+        }
 
         var capturedScreens: [CompanionScreenCapture] = []
 
-        for (displayIndex, display) in sortedDisplays.enumerated() {
+        for (displayIndex, display) in displaysToCapture.enumerated() {
             // Use NSScreen.frame (AppKit coordinates, bottom-left origin) so
             // displayFrame is in the same coordinate system as NSEvent.mouseLocation
             // and the overlay window's screenFrame in BlueCursorView.
@@ -102,12 +131,12 @@ enum CompanionScreenCaptureUtility {
             }
 
             let screenLabel: String
-            if sortedDisplays.count == 1 {
+            if displaysToCapture.count == 1 {
                 screenLabel = "user's screen (cursor is here)"
             } else if isCursorScreen {
-                screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — cursor is on this screen (primary focus)"
+                screenLabel = "screen \(displayIndex + 1) of \(displaysToCapture.count) — cursor is on this screen (primary focus)"
             } else {
-                screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — secondary screen"
+                screenLabel = "screen \(displayIndex + 1) of \(displaysToCapture.count) — secondary screen"
             }
 
             capturedScreens.append(CompanionScreenCapture(

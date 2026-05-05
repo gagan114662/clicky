@@ -10,11 +10,11 @@
 import AVFoundation
 import Foundation
 
+private let elevenLabsDefaultVoiceID = "21m00Tcm4TlvDq8ikWAM"
+private let elevenLabsDefaultModelID = "eleven_flash_v2_5"
+
 @MainActor
 final class ElevenLabsTTSClient {
-    private static let defaultVoiceID = "21m00Tcm4TlvDq8ikWAM"
-    private static let defaultModelID = "eleven_flash_v2_5"
-
     private let ttsURL: URL
     private let apiKey: String
     private let modelID: String
@@ -118,7 +118,7 @@ final class ElevenLabsTTSClient {
             defaultsKeys: ["ElevenLabsVoiceID"],
             infoKeys: ["ElevenLabsVoiceID"],
             environmentKeys: ["IPOP_ELEVENLABS_VOICE_ID", "ELEVENLABS_VOICE_ID"]
-        ) ?? defaultVoiceID
+        ) ?? elevenLabsDefaultVoiceID
     }
 
     private nonisolated static func configuredModelID() -> String {
@@ -126,7 +126,7 @@ final class ElevenLabsTTSClient {
             defaultsKeys: ["ElevenLabsModelID"],
             infoKeys: ["ElevenLabsModelID"],
             environmentKeys: ["IPOP_ELEVENLABS_MODEL_ID", "ELEVENLABS_MODEL_ID"]
-        ) ?? defaultModelID
+        ) ?? elevenLabsDefaultModelID
     }
 
     private nonisolated static func runtimeString(

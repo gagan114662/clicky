@@ -28,7 +28,24 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 12)
 
+                PresenceNowPanelView(
+                    snapshot: companionManager.presenceSnapshot,
+                    onRunMove: { move in
+                        companionManager.runSuggestedPresenceMove(move)
+                    }
+                )
+                .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 12)
+
                 modelPickerRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 12)
+
+                learningControlsSection
                     .padding(.horizontal, 16)
             }
 
@@ -159,7 +176,7 @@ struct CompanionPanelView: View {
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Hold Control+Option to speak. Screen context is only used when you make a screen-aware request.")
+                Text("See Mode reads the current app/window and selected text when macOS exposes it. Screenshots only happen when you press the hot key or start an action.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -550,26 +567,40 @@ struct CompanionPanelView: View {
     // MARK: - Model Picker
 
     private var modelPickerRow: some View {
-        HStack {
-            Text("Model")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+        VStack(spacing: 4) {
+            HStack {
+                Text("Model")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
 
-            Spacer()
+                Spacer()
 
-            HStack(spacing: 0) {
-                modelOptionButton(label: "Fast", modelID: "claude-haiku-4-5-20251001")
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                HStack(spacing: 0) {
+                    modelOptionButton(label: "Fast", modelID: "claude-haiku-4-5-20251001")
+                    modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
             }
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-            )
+
+            HStack {
+                Text("Runtime")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                Spacer()
+                Text(companionManager.activeRuntimeSummary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
         }
         .padding(.vertical, 4)
     }
@@ -591,6 +622,114 @@ struct CompanionPanelView: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+    }
+
+    // MARK: - Learning + Agent Controls
+
+    private var learningControlsSection: some View {
+        VStack(spacing: 8) {
+            controlToggleRow(
+                iconName: "eye.fill",
+                title: "See Mode",
+                subtitle: companionManager.presenceSnapshot.context.appDisplayName,
+                isOn: $companionManager.seeModeEnabled
+            )
+
+            controlToggleRow(
+                iconName: "graduationcap.fill",
+                title: "Teacher Mode",
+                subtitle: "Visual lessons for teach, explain, confusion",
+                isOn: Binding(
+                    get: { companionManager.teacherModeController.isEnabled },
+                    set: { companionManager.teacherModeController.setEnabled($0) }
+                )
+            )
+
+            controlToggleRow(
+                iconName: "cursorarrow.motionlines",
+                title: "Agent Mode",
+                subtitle: "Broad Mac control, with confirmations",
+                isOn: $companionManager.agentModeEnabled
+            )
+
+            if companionManager.agentModeEnabled {
+                controlToggleRow(
+                    iconName: "keyboard.fill",
+                    title: "Cua Driver",
+                    subtitle: CuaDriverBackend.statusSubtitle(isEnabled: companionManager.cuaDriverEnabled),
+                    isOn: $companionManager.cuaDriverEnabled
+                )
+
+                controlToggleRow(
+                    iconName: "bolt.fill",
+                    title: "Yolo",
+                    subtitle: "Skip low-risk prompts only",
+                    isOn: $companionManager.yoloModeEnabled
+                )
+            }
+
+            if let pendingConfirmation = companionManager.computerUseAgent.pendingConfirmation {
+                AgentConfirmationPanelView(
+                    humanReadableSummary: pendingConfirmation.humanReadableSummary,
+                    onApprove: {
+                        companionManager.computerUseAgent.resolvePendingConfirmation(
+                            id: pendingConfirmation.id,
+                            approved: true
+                        )
+                    },
+                    onEdit: { editedInstruction in
+                        companionManager.computerUseAgent.resolvePendingConfirmation(
+                            id: pendingConfirmation.id,
+                            editInstruction: editedInstruction
+                        )
+                    },
+                    onDeny: {
+                        companionManager.computerUseAgent.resolvePendingConfirmation(
+                            id: pendingConfirmation.id,
+                            approved: false
+                        )
+                    }
+                )
+            }
+
+            if companionManager.agentModeEnabled || companionManager.superAppDashboardSnapshot.status != .idle {
+                SuperAppDashboardPanelView(snapshot: companionManager.superAppDashboardSnapshot)
+            }
+        }
+    }
+
+    private func controlToggleRow(
+        iconName: String,
+        title: String,
+        subtitle: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: iconName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(DS.Colors.accent)
+                .scaleEffect(0.78)
+        }
+        .padding(.vertical, 5)
     }
 
     // MARK: - Feedback Button
@@ -710,4 +849,537 @@ struct CompanionPanelView: View {
         }
     }
 
+}
+
+private struct PresenceNowPanelView: View {
+    let snapshot: IPOPPresenceSnapshot
+    let onRunMove: (IPOPProactiveMove) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: iconName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(modeColor)
+                    .frame(width: 16, height: 16)
+                    .padding(.top, 1)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(snapshot.mode.displayName)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(modeColor)
+                        Text(snapshot.context.appDisplayName)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .lineLimit(1)
+                    }
+
+                    Text(snapshot.line)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if !snapshot.suggestedMoves.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(snapshot.suggestedMoves.prefix(2)) { move in
+                        Button(action: { onRunMove(move) }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: iconName(for: move.mode))
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text(move.title)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.82)
+                            }
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color.white.opacity(0.07))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .pointerCursor()
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(modeColor.opacity(0.28), lineWidth: 0.8)
+        )
+    }
+
+    private var iconName: String {
+        iconName(for: snapshot.mode)
+    }
+
+    private func iconName(for mode: IPOPPresenceMode) -> String {
+        switch mode {
+        case .see: return "eye.fill"
+        case .do: return "cursorarrow.motionlines"
+        case .magic: return "sparkles"
+        }
+    }
+
+    private var modeColor: Color {
+        switch snapshot.mode {
+        case .see: return DS.Colors.info
+        case .do: return DS.Colors.accentText
+        case .magic: return DS.Colors.floatingGradientPink
+        }
+    }
+}
+
+private struct SuperAppDashboardPanelView: View {
+    let snapshot: SuperAppDashboardSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: missionIconName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(statusColor)
+                    .frame(width: 16)
+
+                Text("Outcome Engine")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+
+                Spacer()
+
+                Text(snapshot.missionKind.displayName)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                Text(snapshot.status.displayName)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(statusColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(statusColor.opacity(0.12))
+                    )
+            }
+
+            Text(snapshot.objective)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(snapshot.impactPromise)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            dashboardStatusGrid
+
+            if !snapshot.outcomeMetrics.isEmpty {
+                outcomeMetricsView
+            }
+
+            if !snapshot.stepTitles.isEmpty {
+                missionProgressView
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                if let currentApp = snapshot.currentApp {
+                    dashboardRow(
+                        iconName: "app.connected.to.app.below.fill",
+                        title: "App",
+                        value: currentApp.displayName
+                    )
+                }
+                if let step = snapshot.currentStepTitle {
+                    dashboardRow(
+                        iconName: "scope",
+                        title: "Step",
+                        value: step
+                    )
+                }
+                if let nextAction = snapshot.nextAction {
+                    dashboardRow(
+                        iconName: "arrow.forward.circle.fill",
+                        title: "Next",
+                        value: nextAction
+                    )
+                }
+                if let blockedReason = snapshot.blockedReason {
+                    dashboardRow(
+                        iconName: "hand.raised.fill",
+                        title: "Needs",
+                        value: blockedReason,
+                        color: DS.Colors.warning
+                    )
+                } else if let verificationSummary = snapshot.verificationSummary {
+                    dashboardRow(
+                        iconName: "checkmark.seal.fill",
+                        title: "Proof",
+                        value: verificationSummary,
+                        color: DS.Colors.success
+                    )
+                }
+                if let guardrailLine = snapshot.guardrailLine {
+                    dashboardRow(
+                        iconName: "lock.shield.fill",
+                        title: "Safe",
+                        value: guardrailLine,
+                        color: DS.Colors.warning
+                    )
+                }
+            }
+
+            if !snapshot.proofLog.isEmpty {
+                proofLogView
+            }
+
+            if !snapshot.approvalChips.isEmpty {
+                approvalChipsView
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    private var dashboardStatusGrid: some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: 6),
+                GridItem(.flexible(), spacing: 6)
+            ],
+            alignment: .leading,
+            spacing: 6
+        ) {
+            dashboardStatusTile(
+                iconName: "scope",
+                title: "Doing",
+                value: snapshot.currentStepTitle ?? snapshot.status.displayName,
+                color: statusColor
+            )
+            dashboardStatusTile(
+                iconName: "magnifyingglass",
+                title: "Found",
+                value: snapshot.verificationSummary ?? snapshot.proofLine ?? "Gathering proof",
+                color: DS.Colors.info
+            )
+            dashboardStatusTile(
+                iconName: snapshot.blockedReason == nil ? "checkmark.seal.fill" : "hand.raised.fill",
+                title: "Blocked",
+                value: snapshot.blockedReason ?? "Clear",
+                color: snapshot.blockedReason == nil ? DS.Colors.success : DS.Colors.warning
+            )
+            dashboardStatusTile(
+                iconName: "chart.line.uptrend.xyaxis",
+                title: "Outcome",
+                value: snapshot.outcomeMetrics.first(where: { $0.isPrimary })?.value ?? snapshot.impactPromise,
+                color: DS.Colors.accentText
+            )
+        }
+    }
+
+    private func dashboardStatusTile(
+        iconName: String,
+        title: String,
+        value: String,
+        color: Color
+    ) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: iconName)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(color)
+                .frame(width: 11, height: 11)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .lineLimit(1)
+                Text(value)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.78)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.white.opacity(0.045))
+        )
+    }
+
+    private var missionProgressView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            GeometryReader { geometry in
+                let total = max(snapshot.stepTitles.count, 1)
+                let fraction = min(max(CGFloat(snapshot.completedStepCount) / CGFloat(total), 0), 1)
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.08))
+                    Capsule()
+                        .fill(statusColor.opacity(0.72))
+                        .frame(width: max(6, geometry.size.width * fraction))
+                }
+            }
+            .frame(height: 5)
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(snapshot.stepTitles.prefix(4).enumerated()), id: \.offset) { index, title in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: stepIconName(for: index))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(stepColor(for: index))
+                            .frame(width: 12, height: 12)
+                            .padding(.top, 1)
+
+                        Text(title)
+                            .font(.system(size: 10))
+                            .foregroundColor(index <= snapshot.completedStepCount ? DS.Colors.textSecondary : DS.Colors.textTertiary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
+                    }
+                }
+            }
+        }
+    }
+
+    private var outcomeMetricsView: some View {
+        HStack(spacing: 6) {
+            ForEach(snapshot.outcomeMetrics.prefix(3)) { metric in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(metric.label)
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .lineLimit(1)
+                    Text(metric.value)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(metric.isPrimary ? DS.Colors.textPrimary : DS.Colors.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.white.opacity(metric.isPrimary ? 0.075 : 0.045))
+                )
+            }
+        }
+    }
+
+    private func dashboardRow(
+        iconName: String,
+        title: String,
+        value: String,
+        color: Color = DS.Colors.textTertiary
+    ) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: iconName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(color)
+                .frame(width: 13, height: 13)
+                .padding(.top, 1)
+
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(width: 34, alignment: .leading)
+
+            Text(value)
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textSecondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var proofLogView: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Proof log")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            ForEach(snapshot.proofLog.prefix(4)) { entry in
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: proofIconName(for: entry.status))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(proofColor(for: entry.status))
+                        .frame(width: 12, height: 12)
+                        .padding(.top, 1)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(entry.title)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .lineLimit(1)
+                        Text(entry.detail)
+                            .font(.system(size: 9.5))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private var approvalChipsView: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Approval gates")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            ForEach(snapshot.approvalChips.prefix(3)) { chip in
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: approvalIconName(for: chip))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(approvalColor(for: chip))
+                        .frame(width: 12, height: 12)
+                        .padding(.top, 1)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(chip.title)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .lineLimit(1)
+                        Text(chip.detail)
+                            .font(.system(size: 9.5))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func proofIconName(for status: SuperAppProofLogStatus) -> String {
+        switch status {
+        case .planned:
+            return "circle"
+        case .captured:
+            return "checkmark.circle.fill"
+        case .blocked:
+            return "exclamationmark.circle.fill"
+        }
+    }
+
+    private func proofColor(for status: SuperAppProofLogStatus) -> Color {
+        switch status {
+        case .planned:
+            return DS.Colors.textTertiary
+        case .captured:
+            return DS.Colors.success
+        case .blocked:
+            return DS.Colors.warning
+        }
+    }
+
+    private func approvalIconName(for chip: SuperAppApprovalChip) -> String {
+        if chip.riskLevel == .blocked {
+            return "xmark.octagon.fill"
+        }
+        return chip.isBlocking ? "hand.raised.fill" : "lock.fill"
+    }
+
+    private func approvalColor(for chip: SuperAppApprovalChip) -> Color {
+        switch chip.riskLevel {
+        case .blocked:
+            return DS.Colors.destructiveText
+        case .confirmationRequired:
+            return DS.Colors.warning
+        case .medium:
+            return DS.Colors.accentText
+        case .low:
+            return DS.Colors.textTertiary
+        }
+    }
+
+    private func stepIconName(for index: Int) -> String {
+        if index < snapshot.completedStepCount {
+            return "checkmark.circle.fill"
+        }
+        if index == snapshot.completedStepCount && snapshot.status != .idle {
+            return "circle.lefthalf.filled"
+        }
+        return "circle"
+    }
+
+    private func stepColor(for index: Int) -> Color {
+        if index < snapshot.completedStepCount {
+            return DS.Colors.success
+        }
+        if index == snapshot.completedStepCount && snapshot.status != .idle {
+            return statusColor
+        }
+        return DS.Colors.textTertiary
+    }
+
+    private var missionIconName: String {
+        switch snapshot.missionKind {
+        case .learn:
+            return "graduationcap.fill"
+        case .earn:
+            return "briefcase.fill"
+        case .build:
+            return "hammer.fill"
+        case .operate:
+            return "cursorarrow.motionlines"
+        case .automate:
+            return "clock.arrow.circlepath"
+        case .research:
+            return "magnifyingglass"
+        case .communicate:
+            return "bubble.left.and.bubble.right.fill"
+        case .organize:
+            return "square.grid.2x2.fill"
+        case .general:
+            return "sparkles"
+        }
+    }
+
+    private var statusColor: Color {
+        switch snapshot.status {
+        case .idle:
+            return DS.Colors.textTertiary
+        case .planning, .executing, .verifying:
+            return DS.Colors.accentText
+        case .needsConfirmation:
+            return DS.Colors.warning
+        case .blocked, .failed:
+            return DS.Colors.destructiveText
+        case .done:
+            return DS.Colors.success
+        }
+    }
 }

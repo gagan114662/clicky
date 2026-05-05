@@ -81,26 +81,23 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
     ? [env.OPENROUTER_MODEL]
     : MODEL_FALLBACK_CHAIN;
 
-  // Build OpenAI-compatible messages array
-  const openaiMessages: Array<{ role: string; content: string }> = [];
+  // Build OpenAI-compatible messages array. Keep real system instructions in
+  // the system role rather than injecting them into user text, otherwise
+  // downstream models learn the wrong authority boundary.
+  const openaiMessages: Array<{ role: string; content: string | Array<unknown> }> = [];
+
+  if (systemPrompt) {
+    openaiMessages.push({
+      role: "system",
+      content: [{ type: "text", text: systemPrompt }],
+    });
+  }
 
   // Convert each Anthropic message to OpenAI format.
   // Images are converted from Anthropic's base64 source format to OpenAI's image_url format.
-  // System prompt is injected as a text block in the first user message to ensure
-  // compatibility with models that don't support system-role messages (e.g. Gemma via AI Studio).
-  let systemPromptInjected = false;
 
   for (const msg of anthropicMessages) {
     const openaiContentBlocks: Array<unknown> = [];
-
-    // Inject the system prompt as the first text block of the first user message
-    if (msg.role === "user" && !systemPromptInjected && systemPrompt) {
-      openaiContentBlocks.push({
-        type: "text",
-        text: `[System instructions: ${systemPrompt}]\n\n`,
-      });
-      systemPromptInjected = true;
-    }
 
     if (typeof msg.content === "string") {
       openaiContentBlocks.push({ type: "text", text: msg.content });
@@ -121,7 +118,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
       }
     }
 
-    openaiMessages.push({ role: msg.role, content: openaiContentBlocks as unknown as string });
+    openaiMessages.push({ role: msg.role, content: openaiContentBlocks });
   }
 
   // Try Z.ai (GLM 5.1) first if configured, then fall back to OpenRouter

@@ -32,6 +32,12 @@ enum LocalIntentExecutor {
             return await launchOrActivateApp(named: name)
         case .quitApp(let name):
             return quitApp(named: name)
+        case .closeFrontmostWindow:
+            return await closeFrontmostWindow()
+        case .closeWindowInApp(let name):
+            return await closeWindowInApp(named: name)
+        case .calculateInCalculator(let expression):
+            return await calculateInCalculator(expression: expression)
         case .createNote(let text):
             return await createNote(text: text)
         case .clickByName(let name):
@@ -70,6 +76,27 @@ enum LocalIntentExecutor {
             FileLogger.log("⚡️ LocalIntent: create note \"\(text.prefix(80))\(text.count > 80 ? "…" : "")\"")
         }
         return typeResult
+    }
+
+    private static func calculateInCalculator(expression: String) async -> ExecutionResult {
+        let launchResult = await launchOrActivateApp(named: "Calculator")
+        guard case .succeeded = launchResult else { return launchResult }
+
+        try? await Task.sleep(nanoseconds: 180_000_000)
+        _ = pressKeyChord("escape")
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        _ = pressKeyChord("escape")
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        let typeResult = typeText(expression)
+        guard case .succeeded = typeResult else { return typeResult }
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        let returnResult = pressKeyChord("return")
+        if case .succeeded = returnResult {
+            FileLogger.log("⚡️ LocalIntent: calculate in Calculator \"\(expression)\"")
+        }
+        return returnResult
     }
 
     // MARK: - App launch / activate
@@ -310,6 +337,123 @@ enum LocalIntentExecutor {
             }
         }
         return .failed(reason: "no running app named \(requestedName)")
+    }
+
+    private static func closeWindowInApp(named requestedName: String) async -> ExecutionResult {
+        let lowercaseRequested = requestedName.lowercased()
+        guard let runningApp = NSWorkspace.shared.runningApplications.first(where: { app in
+            guard let localizedName = app.localizedName?.lowercased() else { return false }
+            return localizedName == lowercaseRequested
+                || localizedName.contains(lowercaseRequested)
+                || lowercaseRequested.contains(localizedName)
+        }) else {
+            return .failed(reason: "no running app named \(requestedName)")
+        }
+
+        runningApp.activate(options: [.activateAllWindows])
+        await waitForAppToBecomeFrontmost(
+            matching: runningApp.localizedName ?? requestedName,
+            timeoutSeconds: 1.0
+        )
+        FileLogger.log("⚡️ LocalIntent: close window in \"\(runningApp.localizedName ?? requestedName)\"")
+        return await closeFrontmostWindow()
+    }
+
+    private static func closeFrontmostWindow() async -> ExecutionResult {
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
+            return .failed(reason: "no frontmost app")
+        }
+        let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+        let originalWindowTitle = focusedWindowTitle(in: appElement)
+
+        if let focusedWindow = axCopyAttribute(appElement, attribute: kAXFocusedWindowAttribute),
+           CFGetTypeID(focusedWindow) == AXUIElementGetTypeID(),
+           let closeButton = axCopyAttribute(focusedWindow as! AXUIElement, attribute: kAXCloseButtonAttribute),
+           CFGetTypeID(closeButton) == AXUIElementGetTypeID(),
+           AXUIElementPerformAction(closeButton as! AXUIElement, kAXPressAction as CFString) == .success {
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            if focusedWindowDidChange(from: originalWindowTitle, in: appElement) {
+                FileLogger.log("⚡️ LocalIntent: close frontmost window in \(frontmostApp.localizedName ?? "?")")
+                return .succeeded(spokenAcknowledgement: "")
+            }
+            FileLogger.log("⚠️ LocalIntent: AX close reported success but window remained; trying keyboard/menu fallback")
+        }
+
+        _ = pressKeyChord("escape")
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        let commandWResult = pressKeyChord("cmd+w")
+        try? await Task.sleep(nanoseconds: 220_000_000)
+        if focusedWindowDidChange(from: originalWindowTitle, in: appElement) {
+            FileLogger.log("⚡️ LocalIntent: close frontmost window via cmd+w in \(frontmostApp.localizedName ?? "?")")
+            return .succeeded(spokenAcknowledgement: "")
+        }
+
+        if pressFileCloseMenuItem(in: appElement) {
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            if focusedWindowDidChange(from: originalWindowTitle, in: appElement) {
+                FileLogger.log("⚡️ LocalIntent: close frontmost window via File > Close in \(frontmostApp.localizedName ?? "?")")
+                return .succeeded(spokenAcknowledgement: "")
+            }
+        }
+
+        if case .failed = commandWResult {
+            return commandWResult
+        }
+        return .failed(reason: "close command posted, but the front window did not change")
+    }
+
+    private static func focusedWindowTitle(in appElement: AXUIElement) -> String? {
+        guard let focusedWindow = axCopyAttribute(appElement, attribute: kAXFocusedWindowAttribute),
+              CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return axCopyAttribute(focusedWindow as! AXUIElement, attribute: kAXTitleAttribute) as? String
+    }
+
+    private static func focusedWindowDidChange(from originalTitle: String?, in appElement: AXUIElement) -> Bool {
+        let currentTitle = focusedWindowTitle(in: appElement)
+        if originalTitle == nil {
+            return currentTitle == nil
+        }
+        return currentTitle != originalTitle
+    }
+
+    private static func pressFileCloseMenuItem(in appElement: AXUIElement) -> Bool {
+        guard let menuBar = axCopyAttribute(appElement, attribute: kAXMenuBarAttribute),
+              CFGetTypeID(menuBar) == AXUIElementGetTypeID(),
+              let menuBarItems = axCopyAttribute(menuBar as! AXUIElement, attribute: kAXChildrenAttribute) as? [AXUIElement] else {
+            return false
+        }
+
+        guard let fileMenuItem = menuBarItems.first(where: { element in
+            (axCopyAttribute(element, attribute: kAXTitleAttribute) as? String)?.lowercased() == "file"
+        }) else {
+            return false
+        }
+
+        guard AXUIElementPerformAction(fileMenuItem, kAXPressAction as CFString) == .success else {
+            return false
+        }
+        Thread.sleep(forTimeInterval: 0.08)
+
+        guard let menus = axCopyAttribute(fileMenuItem, attribute: kAXChildrenAttribute) as? [AXUIElement] else {
+            return false
+        }
+
+        for menu in menus {
+            guard let menuItems = axCopyAttribute(menu, attribute: kAXChildrenAttribute) as? [AXUIElement] else {
+                continue
+            }
+            if let closeItem = menuItems.first(where: { element in
+                let title = (axCopyAttribute(element, attribute: kAXTitleAttribute) as? String)?.lowercased() ?? ""
+                return title == "close" || title == "close window"
+            }) {
+                return AXUIElementPerformAction(closeItem, kAXPressAction as CFString) == .success
+            }
+        }
+
+        return false
     }
 
     // MARK: - Generic click via AX tree walk

@@ -38,6 +38,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         print("🎯 ipop.ai: Starting...")
         print("🎯 ipop.ai: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
+        guard !isRunningAsUnitTestHost else {
+            print("🎯 ipop.ai: XCTest host detected; skipping live companion startup")
+            return
+        }
+
         // Enforce single-instance. Because ipop.ai is a menu bar app
         // (LSUIElement=true, no dock icon) AND registers itself as a login item
         // via SMAppService, it's very easy to end up with two copies running
@@ -138,6 +143,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         for straggler in stragglers {
             straggler.forceTerminate()
         }
+    }
+
+    private var isRunningAsUnitTestHost: Bool {
+        NSClassFromString("XCTestCase") != nil ||
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 
     /// Registers the app as a login item so it launches automatically on

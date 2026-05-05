@@ -7,11 +7,15 @@
 //  exposes observable voice state for the panel UI.
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import Foundation
 import ScreenCaptureKit
 import SwiftUI
+
+private extension Notification.Name {
+    static let ipopDebugSubmitTranscript = Notification.Name("ipopDebugSubmitTranscript")
+}
 
 enum CompanionVoiceState {
     case idle
@@ -55,11 +59,12 @@ final class CompanionManager: ObservableObject {
     @Published var onboardingPromptText: String = ""
     @Published var onboardingPromptOpacity: Double = 0.0
     @Published var showOnboardingPrompt: Bool = false
+    private var onboardingPromptStreamTask: Task<Void, Never>?
 
     // MARK: - Onboarding Music
 
     private var onboardingMusicPlayer: AVAudioPlayer?
-    private var onboardingMusicFadeTimer: Timer?
+    private var onboardingMusicFadeTask: Task<Void, Never>?
     /// Process running `/usr/bin/say` for TTS fallback. Kept so we can
     /// terminate it when a new response starts before the old one finishes.
     private var macOSSpeechProcess: Process?
@@ -75,11 +80,13 @@ final class CompanionManager: ObservableObject {
 
     private lazy var claudeAPI: any AnthropicChatClient = {
         if let zaiClient = ZAIChatClient.configuredIfEnabled(selectedModel: selectedModel) {
+            activeChatProviderName = "Z.ai"
             FileLogger.log("✅ Using Z.ai direct API for responses")
             return RetryingChatClient(zaiClient, providerName: "Z.ai")
         }
 
         if let proxyURL = Self.configuredClaudeProxyURL() {
+            activeChatProviderName = "Claude proxy"
             FileLogger.log("✅ Using Claude API Worker proxy for responses")
             return RetryingChatClient(
                 ClaudeAPI(authMode: .proxyURL(proxyURL), model: selectedModel),
@@ -88,6 +95,7 @@ final class CompanionManager: ObservableObject {
         }
 
         if ClaudeCodeOAuthProvider.isAvailable() {
+            activeChatProviderName = "Claude OAuth"
             FileLogger.log("✅ Using Claude Code OAuth direct API for responses")
             return RetryingChatClient(
                 ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel),
@@ -96,6 +104,7 @@ final class CompanionManager: ObservableObject {
         }
 
         if ClaudeCodeCLIClient.isAvailable() {
+            activeChatProviderName = "Claude CLI"
             FileLogger.log("⚠️ Claude API credentials unavailable — using Claude Code CLI subprocess fallback")
             return RetryingChatClient(
                 ClaudeCodeCLIClient(model: selectedModel),
@@ -103,6 +112,7 @@ final class CompanionManager: ObservableObject {
             )
         }
 
+        activeChatProviderName = "Claude OAuth"
         FileLogger.log("⚠️ No Claude API proxy, OAuth token, or CLI found — using Claude Code OAuth direct API and surfacing auth errors")
         return RetryingChatClient(
             ClaudeAPI(authMode: .claudeCodeOAuth, model: selectedModel),
@@ -139,6 +149,57 @@ final class CompanionManager: ObservableObject {
     /// Manages persistent memory across sessions: ~/.ipop-ai/memory.md, user.md, history.json.
     private let memoryManager = MemoryManager()
 
+    /// Dedicated teaching controller. It owns active lesson state and keeps
+    /// Teacher Mode isolated from generic recent chat history.
+    let teacherModeController = TeacherModeController()
+
+    /// Visual lesson surface used for instant, readable anchors while native
+    /// apps such as Freeform are warming up.
+    private let lessonVisualOverlayWindowManager = LessonVisualOverlayWindowManager()
+
+    private lazy var agentCursorFlightCoordinator = AgentCursorFlightCoordinator(companionManager: self)
+
+    /// Broad computer-use agent. Kept behind the explicit Agent Mode toggle.
+    lazy var computerUseAgent = ComputerUseAgent(
+        chatClient: claudeAPI,
+        cursorFlightCoordinator: agentCursorFlightCoordinator
+    )
+
+    /// Plans broad "super app" work around the raw computer-use loop so
+    /// iPOP has task memory, app skills, confirmations, and a visible status.
+    private let superAppMissionControl = SuperAppMissionControl()
+    private let tinyfishWebAgentClient = TinyfishWebAgentClient()
+    @Published private(set) var superAppDashboardSnapshot: SuperAppDashboardSnapshot = .empty
+    private var activeSuperAppPlan: SuperAppTaskPlan?
+
+    @Published var seeModeEnabled: Bool = UserDefaults.standard.object(forKey: "seeModeEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "seeModeEnabled") {
+        didSet {
+            UserDefaults.standard.set(seeModeEnabled, forKey: "seeModeEnabled")
+            seeModeEnabled ? startPresenceObservationIfNeeded() : stopPresenceObservation()
+        }
+    }
+    @Published private(set) var presenceSnapshot: IPOPPresenceSnapshot = .empty
+    private var presenceObservationTimer: Timer?
+    private var lastNonIpopSeeContext: IPOPSeeContext?
+
+    @Published var agentModeEnabled: Bool = UserDefaults.standard.bool(forKey: "agentModeEnabled") {
+        didSet { UserDefaults.standard.set(agentModeEnabled, forKey: "agentModeEnabled") }
+    }
+
+    @Published var yoloModeEnabled: Bool = UserDefaults.standard.bool(forKey: "agentYoloModeEnabled") {
+        didSet { UserDefaults.standard.set(yoloModeEnabled, forKey: "agentYoloModeEnabled") }
+    }
+
+    @Published var cuaDriverEnabled: Bool = UserDefaults.standard.object(forKey: CuaDriverBackend.userDefaultsKey) == nil
+        ? CuaDriverBackend.defaultEnabled
+        : UserDefaults.standard.bool(forKey: CuaDriverBackend.userDefaultsKey) {
+        didSet { UserDefaults.standard.set(cuaDriverEnabled, forKey: CuaDriverBackend.userDefaultsKey) }
+    }
+
+    @Published private(set) var activeAgentRunState: AgentRunState = .idle
+
     /// Memory context block injected into every system prompt. Loaded at startup from disk.
     private var memoryCacheSystemPromptBlock: String = ""
 
@@ -153,13 +214,18 @@ final class CompanionManager: ObservableObject {
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
+    private var teacherSurfaceActionTask: Task<Void, Never>?
     private var currentTurnStartDate: Date?
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
+    private var computerUseRunStateCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
+#if DEBUG
+    private var debugTranscriptObserver: NSObjectProtocol?
+#endif
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
@@ -176,12 +242,29 @@ final class CompanionManager: ObservableObject {
 
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = CompanionManager.initialSelectedModel()
+    @Published private(set) var activeChatProviderName: String = "Resolving"
+
+    var activeRuntimeSummary: String {
+        if activeChatProviderName == "Z.ai" {
+            let textModel = ZAIChatClient.resolvedModel(
+                selectedModel: selectedModel,
+                hasImages: false
+            )
+            let visionModel = ZAIChatClient.resolvedModel(
+                selectedModel: selectedModel,
+                hasImages: true
+            )
+            return "Z.ai · text \(textModel) · vision \(visionModel)"
+        }
+        return "\(activeChatProviderName) · \(Self.shortModelName(selectedModel))"
+    }
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
         UserDefaults.standard.set(true, forKey: "hasExplicitlySelectedClaudeModel")
         claudeAPI.model = model
+        FileLogger.log("🧠 Runtime model selected: \(activeRuntimeSummary)")
     }
 
     private static func initialSelectedModel() -> String {
@@ -198,6 +281,13 @@ final class CompanionManager: ObservableObject {
             return fastModel
         }
         return storedModel
+    }
+
+    private static func shortModelName(_ modelID: String) -> String {
+        if modelID.contains("haiku") { return "Haiku 4.5" }
+        if modelID.contains("sonnet") { return "Sonnet 4.6" }
+        if modelID.contains("opus") { return "Opus 4.6" }
+        return modelID
     }
 
     /// User preference for whether the cursor should be shown.
@@ -250,6 +340,11 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        bindComputerUseStateObservation()
+        startPresenceObservationIfNeeded()
+#if DEBUG
+        installDebugTranscriptObserver()
+#endif
 
         // Load persistent memory and seed conversation history from previous sessions
         let sessionContext = memoryManager.loadSessionContext()
@@ -279,9 +374,11 @@ final class CompanionManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.memoryManager.onSessionEnd(fullSessionHistory: self.conversationHistory)
-            CodexAppServerClient.shared.shutdownSync()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.memoryManager.onSessionEnd(fullSessionHistory: self.conversationHistory)
+                CodexAppServerClient.shared.shutdownSync()
+            }
         }
 
         // Eagerly touch the Claude API so its TLS warmup handshake completes
@@ -336,8 +433,8 @@ final class CompanionManager: ObservableObject {
     }
 
     private func stopOnboardingMusic() {
-        onboardingMusicFadeTimer?.invalidate()
-        onboardingMusicFadeTimer = nil
+        onboardingMusicFadeTask?.cancel()
+        onboardingMusicFadeTask = nil
         onboardingMusicPlayer?.stop()
         onboardingMusicPlayer = nil
     }
@@ -355,34 +452,45 @@ final class CompanionManager: ObservableObject {
             player.play()
             self.onboardingMusicPlayer = player
 
-            // After 1m 30s, fade the music out over 3s
-            onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: false) { [weak self] _ in
-                self?.fadeOutOnboardingMusic()
-            }
+            scheduleOnboardingMusicFade(after: 90.0)
         } catch {
             print("⚠️ ipop.ai: Failed to play onboarding music: \(error)")
         }
     }
 
     private func fadeOutOnboardingMusic() {
-        guard let player = onboardingMusicPlayer else { return }
+        scheduleOnboardingMusicFade(after: 0)
+    }
 
+    private func scheduleOnboardingMusicFade(after delay: TimeInterval) {
+        onboardingMusicFadeTask?.cancel()
         let fadeSteps = 30
         let fadeDuration: Double = 3.0
         let stepInterval = fadeDuration / Double(fadeSteps)
-        let volumeDecrement = player.volume / Float(fadeSteps)
-        var stepsRemaining = fadeSteps
 
-        onboardingMusicFadeTimer = Timer.scheduledTimer(withTimeInterval: stepInterval, repeats: true) { [weak self] timer in
-            stepsRemaining -= 1
-            player.volume -= volumeDecrement
-
-            if stepsRemaining <= 0 {
-                timer.invalidate()
-                player.stop()
-                self?.onboardingMusicPlayer = nil
-                self?.onboardingMusicFadeTimer = nil
+        onboardingMusicFadeTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
+            guard !Task.isCancelled, let self, let player = self.onboardingMusicPlayer else {
+                return
+            }
+
+            let volumeDecrement = player.volume / Float(fadeSteps)
+            for _ in 0..<fadeSteps {
+                guard !Task.isCancelled, let activePlayer = self.onboardingMusicPlayer else {
+                    return
+                }
+                activePlayer.volume = max(0, activePlayer.volume - volumeDecrement)
+                try? await Task.sleep(nanoseconds: UInt64(stepInterval * 1_000_000_000))
+            }
+
+            guard !Task.isCancelled, let activePlayer = self.onboardingMusicPlayer else {
+                return
+            }
+            activePlayer.stop()
+            self.onboardingMusicPlayer = nil
+            self.onboardingMusicFadeTask = nil
         }
     }
 
@@ -400,12 +508,48 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        teacherSurfaceActionTask?.cancel()
+        teacherSurfaceActionTask = nil
+        lessonVisualOverlayWindowManager.hide()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
+        computerUseRunStateCancellable?.cancel()
+        stopPresenceObservation()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
+#if DEBUG
+        if let debugTranscriptObserver {
+            DistributedNotificationCenter.default().removeObserver(debugTranscriptObserver)
+            self.debugTranscriptObserver = nil
+        }
+#endif
     }
+
+#if DEBUG
+    private func installDebugTranscriptObserver() {
+        guard debugTranscriptObserver == nil else { return }
+        debugTranscriptObserver = DistributedNotificationCenter.default().addObserver(
+            forName: .ipopDebugSubmitTranscript,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let transcript = notification.userInfo?["transcript"] as? String else { return }
+            Task { @MainActor [weak self] in
+                self?.submitDebugTranscript(transcript)
+            }
+        }
+        FileLogger.log("🧪 Debug transcript injection enabled")
+    }
+
+    private func submitDebugTranscript(_ transcript: String) {
+        let finalTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !finalTranscript.isEmpty else { return }
+        lastTranscript = finalTranscript
+        FileLogger.log("🧪 Debug transcript: \(finalTranscript)")
+        sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+    }
+#endif
 
     func refreshAllPermissions() {
         let previouslyHadAccessibility = hasAccessibilityPermission
@@ -530,6 +674,60 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] powerLevel in
                 self?.currentAudioPowerLevel = powerLevel
             }
+    }
+
+    private func bindComputerUseStateObservation() {
+        computerUseRunStateCancellable = computerUseAgent.$runState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] runState in
+                self?.activeAgentRunState = runState
+                self?.updateSuperAppDashboard(for: runState)
+            }
+    }
+
+    private func startPresenceObservationIfNeeded() {
+        guard seeModeEnabled else { return }
+        refreshPresenceSnapshot()
+        guard presenceObservationTimer == nil else { return }
+        presenceObservationTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshPresenceSnapshot()
+            }
+        }
+    }
+
+    private func stopPresenceObservation() {
+        presenceObservationTimer?.invalidate()
+        presenceObservationTimer = nil
+        presenceSnapshot = .empty
+    }
+
+    private func refreshPresenceSnapshot() {
+        guard seeModeEnabled else { return }
+        var context = IPOPSeeContextReader.capture()
+        if context.bundleIdentifier == Bundle.main.bundleIdentifier,
+           let lastNonIpopSeeContext {
+            context = lastNonIpopSeeContext
+        } else if context.bundleIdentifier != Bundle.main.bundleIdentifier {
+            lastNonIpopSeeContext = context
+        }
+
+        presenceSnapshot = IPOPPresenceEngine.snapshot(
+            from: context,
+            recentTasks: Array(superAppMissionControl.recentTaskMemory().suffix(3)),
+            agentModeEnabled: agentModeEnabled,
+            teacherModeEnabled: teacherModeController.isEnabled
+        )
+    }
+
+    func runSuggestedPresenceMove(_ move: IPOPProactiveMove) {
+        let command = move.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { return }
+        if move.requiresAgentMode {
+            agentModeEnabled = true
+        }
+        lastTranscript = command
+        sendTranscriptToClaudeWithScreenshot(transcript: command)
     }
 
     private func bindVoiceStateObservation() {
@@ -680,6 +878,7 @@ final class CompanionManager: ObservableObject {
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
+    - never click, type, press return, or submit anything that could send a message, submit an application/form, make a purchase/payment, delete data, or change an account unless the user has explicitly confirmed that final action.
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
@@ -760,7 +959,10 @@ final class CompanionManager: ObservableObject {
         return !words.isDisjoint(with: deicticWords)
     }
 
-    private func routeTranscriptToCodexIfNeeded(_ transcript: String) async -> Bool {
+    private func routeTranscriptToCodexIfNeeded(
+        _ transcript: String,
+        presenceSnapshot: IPOPPresenceSnapshot
+    ) async -> Bool {
         // Route to Codex before screenshot capture. Agent tasks do not need
         // screen pixels, and avoiding capture keeps multi-agent requests snappy.
         let isAgent = CodexCLIClient.isAgentTask(transcript)
@@ -773,7 +975,13 @@ final class CompanionManager: ObservableObject {
         // should not receive visible emails, browser tabs, files, or other
         // sensitive desktop state unless the user explicitly provides it.
         let screenshotsForCodex: [(data: Data, label: String)] = []
-        let memoryBlock = memoryCacheSystemPromptBlock
+        let memoryBlock = [
+            memoryCacheSystemPromptBlock,
+            presenceSnapshot.promptBlock
+        ]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
 
         // If the user asked for multiple parallel sessions ("spawn two
         // sessions, one for X and one for Y"), decompose into N tasks.
@@ -879,24 +1087,90 @@ final class CompanionManager: ObservableObject {
     /// the buddy to fly to that element on screen.
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
+        teacherSurfaceActionTask?.cancel()
+        teacherSurfaceActionTask = nil
         elevenLabsSpeechTask?.cancel()
         elevenLabsSpeechTask = nil
         elevenLabsTTSClient.stopPlayback()
         macOSSpeechProcess?.terminate()
         macOSSpeechProcess = nil
+        refreshPresenceSnapshot()
+        let currentPresenceSnapshot = presenceSnapshot
+
+        let shouldRouteToCodexAgent = CodexCLIClient.isAgentTask(transcript) && CodexCLIClient.isAvailable()
+        let learningRoute = LearningIntentRouter.route(
+            transcript: transcript,
+            isTeacherModeEnabled: teacherModeController.isEnabled,
+            hasActiveLesson: teacherModeController.hasActiveLesson
+        )
+        let shouldRouteToTeacherMode = !shouldRouteToCodexAgent && learningRoute == .teacherMode
+        let localIntent = LocalIntentRouter.route(transcript: transcript)
+
+        if learningRoute == .endLesson {
+            runEndLessonTurn(transcript: transcript)
+            return
+        }
+
+        if localIntent != .unmatched && !shouldRouteToTeacherMode {
+            clearTeacherSurfaceForNonLearningTurn(reason: "local intent \(localIntent)")
+            runLocalIntentTurn(transcript: transcript, intent: localIntent)
+            return
+        }
+
+        if shouldRouteToTeacherMode {
+            currentResponseTask = Task {
+                voiceState = .processing
+                do {
+                    try await runTeacherLessonTurn(transcript: transcript)
+                } catch is CancellationError {
+                    // User spoke again — teacher turn was interrupted.
+                } catch {
+                    IpopAnalytics.trackResponseError(error: error.localizedDescription)
+                    print("⚠️ Teacher Mode error: \(error)")
+                    speakCreditsErrorFallback()
+                }
+
+                if !Task.isCancelled {
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+                }
+            }
+            return
+        }
+
+        if let tinyfishTask = TinyfishWebTaskRouter.route(
+            transcript: transcript,
+            screenContext: currentPresenceSnapshot.promptBlock
+        ) {
+            clearTeacherSurfaceForNonLearningTurn(reason: "tinyfish web agent turn")
+            runTinyfishWebAgentTurn(
+                task: tinyfishTask,
+                presenceSnapshot: currentPresenceSnapshot
+            )
+            return
+        }
+
+        if agentModeEnabled && !shouldRouteToCodexAgent && Self.shouldRouteToComputerUseAgent(transcript) {
+            clearTeacherSurfaceForNonLearningTurn(reason: "computer-use agent turn")
+            runComputerUseAgentTurn(
+                forUserInstruction: transcript,
+                presenceSnapshot: currentPresenceSnapshot
+            )
+            return
+        }
 
         currentResponseTask = Task {
+            clearTeacherSurfaceForNonLearningTurn(reason: shouldRouteToCodexAgent ? "codex agent turn" : "general conversation turn")
             // Stay in processing (spinner) state — no streaming text displayed
             voiceState = .processing
             currentTurnStartDate = Date()
             logPipelinePhase("turn started")
 
             do {
-                if await routeTranscriptToCodexIfNeeded(transcript) {
-                    return
-                }
-
-                if await routeTranscriptToLocalIntentIfNeeded(transcript) {
+                if await routeTranscriptToCodexIfNeeded(
+                    transcript,
+                    presenceSnapshot: currentPresenceSnapshot
+                ) {
                     return
                 }
 
@@ -930,15 +1204,11 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                // Capture which app the user is currently working in so Claude
-                // can give more targeted help without needing to infer it from the screenshot.
-                let frontmostAppName = NSWorkspace.shared.frontmostApplication?.localizedName
-                let userPromptWithAppContext: String = {
-                    if let appName = frontmostAppName {
-                        return "[User is currently in \(appName)]\n\(transcript)"
-                    }
-                    return transcript
-                }()
+                let userPromptWithAppContext = """
+                \(currentPresenceSnapshot.promptBlock)
+
+                \(transcript)
+                """
 
                 var didReceiveFirstChunk = false
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
@@ -966,17 +1236,46 @@ final class CompanionManager: ObservableObject {
                 let compoundResult = ActionTagParser.parseAllActionTags(from: fullResponseText)
                 FileLogger.log("📝 Parsed \(compoundResult.actions.count) action tags from response")
                 let parseResult = compoundResult.pointResult
-                let spokenText = compoundResult.spokenText
+                let actionSequenceRequiresConfirmation = Self.companionActionTagsRequireConfirmation(
+                    transcript: transcript,
+                    actions: compoundResult.actions
+                )
 
+                var actionSafetyMessages: [String] = []
+                var previousActionToolUseBlock: ParsedToolUseBlock? = nil
                 for action in compoundResult.actions {
-                    let executionResult = await LocalIntentExecutor.execute(action)
-                    switch executionResult {
-                    case .succeeded:
-                        FileLogger.log("⚡️ Claude action executed: \(action)")
-                    case .failed(let reason):
-                        FileLogger.log("⚠️ Claude action failed: \(action) — \(reason)")
+                    let toolUseBlock = Self.synthesizedToolUseBlock(forCompanionAction: action)
+                    let safetyDecision = Self.companionActionSequenceSafetyDecision(
+                        for: action,
+                        requiresConfirmation: actionSequenceRequiresConfirmation
+                    ) ?? AgentSafetyClassifier.classify(
+                        toolUseBlock: toolUseBlock,
+                        previousToolUseBlock: previousActionToolUseBlock,
+                        missionRequiresConfirmation: actionSequenceRequiresConfirmation
+                    )
+
+                    switch safetyDecision {
+                    case .auto:
+                        let executionResult = await LocalIntentExecutor.execute(action)
+                        switch executionResult {
+                        case .succeeded:
+                            FileLogger.log("⚡️ Claude action executed: \(action)")
+                            previousActionToolUseBlock = toolUseBlock
+                        case .failed(let reason):
+                            FileLogger.log("⚠️ Claude action failed: \(action) — \(reason)")
+                        }
+                    case .confirmRequired(let reason):
+                        FileLogger.log("🛑 Claude action skipped pending confirmation: \(action) — \(reason)")
+                        actionSafetyMessages.append("i need your confirmation before i do that.")
+                    case .blocked(let reason):
+                        FileLogger.log("🛑 Claude action blocked: \(action) — \(reason)")
+                        actionSafetyMessages.append("i blocked that action because it looked unsafe.")
                     }
                 }
+                let spokenText = Self.spokenText(
+                    compoundResult.spokenText,
+                    appendingSafetyMessages: actionSafetyMessages
+                )
 
                 // Handle element pointing if Claude returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
@@ -1071,6 +1370,892 @@ final class CompanionManager: ObservableObject {
                 scheduleTransientHideIfNeeded()
             }
         }
+    }
+
+    private func runEndLessonTurn(transcript: String) {
+        currentResponseTask = Task {
+            voiceState = .processing
+            let endedLesson = teacherModeController.endLesson()
+            lessonVisualOverlayWindowManager.hide()
+            if endedLesson != nil {
+                LearningActionExecutor.dismissPreparedLessonSurface()
+            }
+            let response: String
+            if let endedLesson {
+                response = "lesson wrapped. we were working on \(endedLesson.displayTitle)."
+            } else {
+                response = "no active lesson was running."
+            }
+
+            conversationHistory.append((userTranscript: transcript, assistantResponse: response))
+            if conversationHistory.count > 10 {
+                conversationHistory.removeFirst(conversationHistory.count - 10)
+            }
+            memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: response)
+
+            speakWithPreferredVoice(response)
+            voiceState = .responding
+
+            if !Task.isCancelled {
+                voiceState = .idle
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func clearTeacherSurfaceForNonLearningTurn(reason: String) {
+        guard teacherModeController.hasActiveLesson else {
+            lessonVisualOverlayWindowManager.hide()
+            return
+        }
+        let endedLesson = teacherModeController.endLesson()
+        teacherSurfaceActionTask?.cancel()
+        teacherSurfaceActionTask = nil
+        lessonVisualOverlayWindowManager.hide()
+        LearningActionExecutor.dismissPreparedLessonSurface()
+        FileLogger.log("🎓 Cleared teacher surface for \(reason): \(endedLesson?.displayTitle ?? "active lesson")")
+    }
+
+    private func runLocalIntentTurn(transcript: String, intent: LocalIntent) {
+        FileLogger.log("🎯 LocalIntentRouter matched: \(intent) (transcript: \"\(transcript)\")")
+        currentResponseTask = Task {
+            voiceState = .processing
+            let result = await LocalIntentExecutor.execute(intent)
+            switch result {
+            case .succeeded(let spokenAcknowledgement):
+                let assistantResponse = spokenAcknowledgement.isEmpty
+                    ? "(executed local action: \(intent))"
+                    : spokenAcknowledgement
+                conversationHistory.append((userTranscript: transcript, assistantResponse: assistantResponse))
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+                memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: assistantResponse)
+
+                if !spokenAcknowledgement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    speakWithPreferredVoice(spokenAcknowledgement)
+                    voiceState = .responding
+                } else {
+                    voiceState = .idle
+                }
+            case .failed(let reason):
+                FileLogger.log("⚠️ LocalIntent failed: \(reason) (intent: \(intent))")
+                let response = "I couldn't do that directly: \(reason)."
+                memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: response)
+                speakWithPreferredVoice(response)
+                voiceState = .responding
+            }
+
+            if !Task.isCancelled {
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func runTeacherLessonTurn(transcript: String) async throws {
+        let turnStartedAt = Date()
+
+        let bridgeText = teacherModeController.bridgeLine(for: transcript)
+        speakWithPreferredVoice(bridgeText)
+        let firstAudioMS = Self.milliseconds(since: turnStartedAt)
+        voiceState = .processing
+
+        let assetGatherStartedAt = Date()
+        var screenCaptures = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
+        var frontmostAppName = NSWorkspace.shared.frontmostApplication?.localizedName
+        var assetContext = LearningAssetContextBuilder.build(
+            frontmostAppName: frontmostAppName,
+            screenCaptures: screenCaptures
+        )
+        var assetGatherMS = Self.milliseconds(since: assetGatherStartedAt)
+        var surfaceActionMS: Int?
+        var preparedLearningSurfaceContext: String?
+        var preparedDiagramSpec: FreeformDiagramSpec?
+
+        if let immediateAction = teacherModeController.immediateLearningAction(
+            transcript: transcript,
+            assetContext: assetContext
+        ) {
+            if case .prepareFreeformDiagram(let diagramSpec) = immediateAction {
+                preparedLearningSurfaceContext = diagramSpec.promptContext
+                preparedDiagramSpec = diagramSpec
+                lessonVisualOverlayWindowManager.show(spec: diagramSpec)
+                assetContext = LearningAssetContext(
+                    assetType: .whiteboard,
+                    frontmostAppName: "iPOP lesson canvas",
+                    candidateTopic: diagramSpec.title,
+                    browserTitle: assetContext.browserTitle,
+                    browserURL: assetContext.browserURL,
+                    selectedFilePaths: assetContext.selectedFilePaths,
+                    selectedFilePreview: assetContext.selectedFilePreview,
+                    screenContextLines: assetContext.screenContextLines,
+                    assetNotes: assetContext.assetNotes + [
+                        "instant_lesson_canvas: iPOP displayed a large readable canvas immediately; native Freeform setup continues in the background."
+                    ]
+                )
+                frontmostAppName = "iPOP lesson canvas"
+                surfaceActionMS = 0
+                runTeacherSurfaceActionInBackground(immediateAction)
+            } else {
+                let surfaceActionStartedAt = Date()
+                let actionResult = await LearningActionExecutor.execute(immediateAction)
+                surfaceActionMS = Self.milliseconds(since: surfaceActionStartedAt)
+                print("🎓 Teacher surface action \(immediateAction.logLabel): \(actionResult)")
+
+                let settleNanoseconds: UInt64
+                switch immediateAction {
+                case .openURL:
+                    settleNanoseconds = 1_200_000_000
+                default:
+                    settleNanoseconds = 600_000_000
+                }
+                try? await Task.sleep(nanoseconds: settleNanoseconds)
+                try Task.checkCancellation()
+
+                let refreshedContextStartedAt = Date()
+                screenCaptures = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
+                frontmostAppName = NSWorkspace.shared.frontmostApplication?.localizedName
+                assetContext = LearningAssetContextBuilder.build(
+                    frontmostAppName: frontmostAppName,
+                    screenCaptures: screenCaptures
+                )
+                assetGatherMS += Self.milliseconds(since: refreshedContextStartedAt)
+            }
+        }
+
+        let lesson = teacherModeController.beginOrUpdateLesson(
+            transcript: transcript,
+            assetContext: assetContext,
+            preparedLearningSurfaceContext: preparedLearningSurfaceContext
+        )
+
+        let labeledImages = screenCaptures.map { capture in
+            let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+            return (data: capture.imageData, label: capture.label + dimensionInfo)
+        }
+        let historyForAPI = lesson.recentTurns.suffix(4).map { turn in
+            (userPlaceholder: turn.userTranscript, assistantResponse: turn.assistantResponse)
+        }
+        let teacherSystemPrompt = teacherModeController.systemPrompt(
+            memoryContextBlock: memoryManager.loadTeacherMemoryPromptBlock(),
+            learnerProfileBlock: memoryManager.loadLearnerProfilePromptBlock()
+        )
+        let teacherUserPrompt = teacherModeController.userPrompt(
+            transcript: transcript,
+            assetContext: assetContext,
+            lesson: lesson
+        )
+
+        let modelStartedAt = Date()
+        let rawTeachingMove: TeachingMove
+        let modelMS: Int
+        if let localMove = teacherModeController.localTeachingMove(
+            transcript: transcript,
+            lesson: lesson,
+            preparedDiagramSpec: preparedDiagramSpec
+        ) {
+            rawTeachingMove = localMove
+            modelMS = 0
+        } else {
+            let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                images: labeledImages,
+                systemPrompt: teacherSystemPrompt,
+                conversationHistory: historyForAPI,
+                userPrompt: teacherUserPrompt,
+                onTextChunk: { _ in }
+            )
+            try Task.checkCancellation()
+            rawTeachingMove = TeachingMove.parse(from: fullResponseText)
+            modelMS = Self.milliseconds(since: modelStartedAt)
+        }
+
+        let validatedTeachingMove = TeacherTurnValidator.repairedMove(
+            rawTeachingMove,
+            lesson: lesson,
+            assetContext: assetContext
+        )
+        let qualityCheckedMove = TeacherQualityLoop.refinedMove(
+            validatedTeachingMove,
+            lesson: lesson,
+            assetContext: assetContext
+        )
+        let experienceMove = LearningExperienceDesigner.refinedMove(
+            qualityCheckedMove,
+            lesson: lesson,
+            assetContext: assetContext
+        )
+        let teachingMove = LearningPresenceEngine.refinedMove(
+            experienceMove,
+            transcript: transcript,
+            lesson: lesson,
+            assetContext: assetContext
+        )
+        let pointParseResult = Self.parsePointingCoordinates(from: teachingMove.responseWithPointTag())
+        let spokenText = pointParseResult.spokenText
+        applyPointing(pointParseResult, screenCaptures: screenCaptures, logPrefix: "Teacher pointing")
+
+        var metrics = LessonTurnMetrics(
+            transcriptMS: nil,
+            firstAudioMS: firstAudioMS,
+            assetGatherMS: assetGatherMS,
+            surfaceActionMS: surfaceActionMS,
+            modelMS: modelMS,
+            ttsStartMS: nil,
+            route: "teacher_mode",
+            surface: assetContext.assetType.rawValue,
+            memoryWriteEnabled: true
+        )
+
+        if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            speakWithPreferredVoice(spokenText)
+            metrics.ttsStartMS = Self.milliseconds(since: turnStartedAt)
+            voiceState = .responding
+        }
+
+        let updatedLesson = teacherModeController.completeTurn(
+            userTranscript: transcript,
+            assistantResponse: spokenText,
+            teachingMove: teachingMove,
+            metrics: metrics
+        )
+
+        conversationHistory.append((userTranscript: transcript, assistantResponse: spokenText))
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
+        }
+        memoryManager.onTeacherTurnCompleted(
+            userTranscript: transcript,
+            assistantResponse: spokenText,
+            lessonSnapshot: updatedLesson
+        )
+
+        print("🎓 Teacher Mode lesson: \(updatedLesson?.displayTitle ?? lesson.displayTitle)")
+        IpopAnalytics.trackAIResponseReceived(response: spokenText)
+
+        if let modelAction = teachingMove.surfaceAction {
+            let actionResult = await executeTeacherLearningAction(modelAction)
+            print("🎓 Teacher follow-up action \(modelAction.logLabel): \(actionResult)")
+        }
+    }
+
+    private func executeTeacherLearningAction(_ action: LearningAction) async -> String {
+        if case .writeFreeformText(let noteText) = action {
+            let noteCount = lessonVisualOverlayWindowManager.addBoardNote(noteText)
+            return "wrote visible lesson note in overlay lane \(noteCount)"
+        }
+
+        if Self.shouldKeepLessonOnVisibleBrowserSurface(action, lesson: teacherModeController.activeLesson) {
+            FileLogger.log("🎓 Skipped scratchpad action for browser lesson: \(action.logLabel)")
+            return "kept browser lesson surface visible"
+        }
+
+        if Self.shouldExposeNativeFreeformSurface(for: action) {
+            lessonVisualOverlayWindowManager.hide()
+            try? await Task.sleep(nanoseconds: 120_000_000)
+        }
+        return await LearningActionExecutor.execute(action)
+    }
+
+    private func runTeacherSurfaceActionInBackground(_ action: LearningAction) {
+        teacherSurfaceActionTask?.cancel()
+        teacherSurfaceActionTask = Task {
+            guard !Task.isCancelled else { return }
+            if Self.shouldKeepLessonOnVisibleBrowserSurface(action, lesson: teacherModeController.activeLesson) {
+                FileLogger.log("🎓 Skipped background scratchpad action for browser lesson: \(action.logLabel)")
+                return
+            }
+            let actionResult = await LearningActionExecutor.execute(action)
+            guard !Task.isCancelled else { return }
+            print("🎓 Teacher background surface action \(action.logLabel): \(actionResult)")
+        }
+    }
+
+    private static func shouldExposeNativeFreeformSurface(for action: LearningAction) -> Bool {
+        switch action {
+        case .prepareFreeformBoard:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func shouldKeepLessonOnVisibleBrowserSurface(
+        _ action: LearningAction,
+        lesson: LessonSession?
+    ) -> Bool {
+        guard let lesson else { return false }
+
+        let lessonSurfaceText = [
+            lesson.topic,
+            lesson.currentGoal,
+            lesson.activeAppName ?? ""
+        ]
+            .joined(separator: " ")
+            .lowercased()
+        let shouldKeepVisibleSurface = lesson.assetType == .youtube
+            || lesson.assetType == .browserPage
+            || lessonSurfaceText.contains("youtube")
+            || lessonSurfaceText.contains("video")
+            || lessonSurfaceText.contains("browser")
+            || lessonSurfaceText.contains("safari")
+        guard shouldKeepVisibleSurface else { return false }
+
+        switch action {
+        case .openScratchpad, .writeScratchpad:
+            return true
+        case .openNativeApp(let appName):
+            let normalizedAppName = appName
+                .lowercased()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalizedAppName == "textedit" || normalizedAppName == "text edit"
+        default:
+            return false
+        }
+    }
+
+    static func synthesizedToolUseBlock(forCompanionAction action: LocalIntent) -> ParsedToolUseBlock {
+        let inputJSON: [String: Any]
+        switch action {
+        case .launchOrActivateApp(let name):
+            inputJSON = ["action": "open_app", "text": name]
+        case .quitApp(let name):
+            inputJSON = ["action": "quit_app", "text": name]
+        case .closeFrontmostWindow:
+            inputJSON = ["action": "close_window"]
+        case .closeWindowInApp(let name):
+            inputJSON = ["action": "close_window", "text": name]
+        case .calculateInCalculator(let expression):
+            inputJSON = ["action": "type", "text": expression]
+        case .createNote(let text):
+            inputJSON = ["action": "type", "text": text]
+        case .clickByName(let targetName):
+            inputJSON = ["action": "ax_click", "text": targetName]
+        case .typeText(let text):
+            inputJSON = ["action": "type", "text": text]
+        case .pressKeyChord(let chord):
+            inputJSON = ["action": "key", "text": chord]
+        case .scroll(let direction):
+            inputJSON = ["action": "scroll", "text": String(describing: direction)]
+        case .currentTime:
+            inputJSON = ["action": "current_time"]
+        case .unmatched:
+            inputJSON = ["action": "none"]
+        }
+
+        return ParsedToolUseBlock(
+            toolUseId: "companion-action-\(UUID().uuidString)",
+            toolName: "computer",
+            inputJSON: inputJSON
+        )
+    }
+
+    static func companionActionTagsRequireConfirmation(
+        transcript: String,
+        actions: [LocalIntent]
+    ) -> Bool {
+        let normalizedTranscript = transcript.lowercased()
+        let transcriptRiskSignals = [
+            "draft a note", "make a note", "create a note", "write a note",
+            "take a note", "jot down", "note down", "notes app",
+            "draft an email", "send an email", "send a message", "submit",
+            "apply to", "apply with", "payment", "purchase", "delete"
+        ]
+        if transcriptRiskSignals.contains(where: { normalizedTranscript.contains($0) }) {
+            return true
+        }
+
+        let opensNotes = actions.contains { action in
+            if case .launchOrActivateApp(let name) = action {
+                return name.lowercased().contains("notes")
+            }
+            return false
+        }
+        let writesContent = actions.contains { action in
+            if case .typeText = action { return true }
+            if case .createNote = action { return true }
+            return false
+        }
+        return opensNotes && writesContent
+    }
+
+    static func companionActionSequenceSafetyDecision(
+        for action: LocalIntent,
+        requiresConfirmation: Bool
+    ) -> AgentSafetyDecision? {
+        guard requiresConfirmation else { return nil }
+
+        switch action {
+        case .typeText, .createNote:
+            return .confirmRequired(reason: "Mission requires approval before writing persistent or external content")
+        case .pressKeyChord(let chord):
+            let normalizedChord = chord
+                .lowercased()
+                .replacingOccurrences(of: "command", with: "cmd")
+                .split(separator: "+")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "+")
+            if normalizedChord == "cmd+n" || normalizedChord == "return" || normalizedChord == "cmd+return" {
+                return .confirmRequired(reason: "Mission requires approval before creating or submitting content")
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    static func spokenText(
+        _ base: String,
+        appendingSafetyMessages safetyMessages: [String]
+    ) -> String {
+        var uniqueMessages: [String] = []
+        for message in safetyMessages {
+            guard !uniqueMessages.contains(message) else { continue }
+            uniqueMessages.append(message)
+        }
+
+        guard !uniqueMessages.isEmpty else {
+            return base
+        }
+
+        let trimmedBase = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safetySuffix = uniqueMessages.joined(separator: " ")
+        if trimmedBase.isEmpty {
+            return safetySuffix
+        }
+        return "\(trimmedBase) \(safetySuffix)"
+    }
+
+    private func runComputerUseAgentTurn(
+        forUserInstruction transcript: String,
+        presenceSnapshot: IPOPPresenceSnapshot
+    ) {
+        let missionPlan = superAppMissionControl.plan(
+            for: transcript,
+            screenContext: presenceSnapshot.promptBlock
+        )
+        FileLogger.log("""
+        🧭 SuperApp plan: \(missionPlan.objective)
+        🧭 Apps: \(missionPlan.targetApps.map(\.displayName).joined(separator: ", "))
+        🧭 Requires confirmation: \(missionPlan.requiresConfirmation)\(missionPlan.confirmationReason.map { " — \($0)" } ?? "")
+        🧭 Steps: \(missionPlan.steps.map(\.title).joined(separator: " → "))
+        """)
+        activeSuperAppPlan = missionPlan
+        superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+            for: missionPlan,
+            status: .planning
+        )
+
+        currentResponseTask = Task {
+            voiceState = .processing
+            activeAgentRunState = .waitingForClaude
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: missionPlan,
+                status: .executing,
+                currentStepIndex: 0
+            )
+
+            do {
+                let agentResultText = try await computerUseAgent.runAgentTurn(
+                    userInstruction: transcript,
+                    yoloMode: yoloModeEnabled,
+                    cuaDriverEnabled: cuaDriverEnabled,
+                    missionRequiresConfirmation: missionPlan.requiresConfirmation,
+                    upworkStandingSubmissionApproval: missionPlan.workflowContext?.contains("STANDING_UPWORK_SUBMISSION_APPROVAL=granted") == true,
+                    missionContext: [
+                        presenceSnapshot.promptBlock,
+                        missionPlan.agentSystemContext
+                    ].joined(separator: "\n\n")
+                )
+
+                try Task.checkCancellation()
+                activeAgentRunState = .finishedWithText(agentResultText)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .done,
+                    currentStepIndex: max(missionPlan.steps.count - 1, 0),
+                    resultSummary: agentResultText
+                )
+                superAppMissionControl.record(
+                    plan: missionPlan,
+                    status: .done,
+                    resultSummary: agentResultText
+                )
+                conversationHistory.append((userTranscript: transcript, assistantResponse: agentResultText))
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+                memoryManager.onTurnCompleted(userTranscript: transcript, assistantResponse: agentResultText)
+                IpopAnalytics.trackAIResponseReceived(response: agentResultText)
+
+                let trimmedResultText = agentResultText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedResultText.isEmpty {
+                    speakWithPreferredVoice(trimmedResultText)
+                    voiceState = .responding
+                }
+            } catch is CancellationError {
+                activeAgentRunState = .idle
+            } catch {
+                activeAgentRunState = .failedWithError(error.localizedDescription)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .failed,
+                    currentStepIndex: max(missionPlan.steps.count - 1, 0),
+                    resultSummary: error.localizedDescription
+                )
+                superAppMissionControl.record(
+                    plan: missionPlan,
+                    status: .failed,
+                    resultSummary: error.localizedDescription
+                )
+                IpopAnalytics.trackResponseError(error: error.localizedDescription)
+                print("⚠️ Agent run error: \(error)")
+                speakWithPreferredVoice("Agent failed: \(error.localizedDescription)")
+                voiceState = .responding
+            }
+
+            if !Task.isCancelled {
+                voiceState = .idle
+                activeSuperAppPlan = nil
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func runTinyfishWebAgentTurn(
+        task: TinyfishWebAgentTask,
+        presenceSnapshot: IPOPPresenceSnapshot
+    ) {
+        let missionPlan = superAppMissionControl.plan(
+            for: task.originalTranscript,
+            screenContext: presenceSnapshot.promptBlock
+        )
+        FileLogger.log("""
+        🐟 Tinyfish web task: \(task.originalTranscript)
+        🐟 URL: \(task.url.absoluteString)
+        🐟 Requires confirmation: \(task.requiresConfirmation)\(task.confirmationReason.map { " — \($0)" } ?? "")
+        🐟 Blocked: \(task.blockedReason ?? "no")
+        """)
+
+        activeSuperAppPlan = missionPlan
+        superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+            for: missionPlan,
+            status: .planning
+        )
+
+        currentResponseTask = Task {
+            voiceState = .processing
+            activeAgentRunState = .waitingForClaude
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: missionPlan,
+                status: .executing,
+                currentStepIndex: 0,
+                resultSummary: "Tinyfish is preparing the remote browser."
+            )
+
+            do {
+                if let blockedReason = task.blockedReason {
+                    throw TinyfishWebAgentError.blocked(reason: blockedReason)
+                }
+                if let confirmationReason = task.confirmationReason, task.requiresConfirmation {
+                    throw TinyfishWebAgentError.confirmationRequired(reason: confirmationReason)
+                }
+                if !tinyfishWebAgentClient.isConfigured {
+                    throw TinyfishWebAgentError.notConfigured
+                }
+
+                let result = try await tinyfishWebAgentClient.run(task)
+                try Task.checkCancellation()
+
+                let resultText = result.spokenSummary
+                activeAgentRunState = .finishedWithText(resultText)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .done,
+                    currentStepIndex: max(missionPlan.steps.count - 1, 0),
+                    resultSummary: resultText
+                )
+                superAppMissionControl.record(
+                    plan: missionPlan,
+                    status: .done,
+                    resultSummary: resultText
+                )
+                conversationHistory.append((userTranscript: task.originalTranscript, assistantResponse: resultText))
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+                memoryManager.onTurnCompleted(userTranscript: task.originalTranscript, assistantResponse: resultText)
+                IpopAnalytics.trackAIResponseReceived(response: resultText)
+
+                let trimmedResultText = resultText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedResultText.isEmpty {
+                    speakWithPreferredVoice(trimmedResultText)
+                    voiceState = .responding
+                }
+            } catch is CancellationError {
+                activeAgentRunState = .idle
+            } catch TinyfishWebAgentError.confirmationRequired(let reason) {
+                let message = "I can use Tinyfish for that web task, but \(reason). I stopped before handing it to the remote browser."
+                activeAgentRunState = .awaitingUserConfirmation(toolName: "tinyfish", humanReadableSummary: message)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .needsConfirmation,
+                    currentStepIndex: missionPlan.steps.firstIndex(where: { $0.needsUserConfirmation }) ?? 0,
+                    resultSummary: message
+                )
+                speakWithPreferredVoice(message)
+                voiceState = .responding
+            } catch TinyfishWebAgentError.blocked(let reason) {
+                let message = "I blocked that Tinyfish web task: \(reason)"
+                activeAgentRunState = .failedWithError(message)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .blocked,
+                    currentStepIndex: 0,
+                    resultSummary: message
+                )
+                speakWithPreferredVoice(message)
+                voiceState = .responding
+            } catch TinyfishWebAgentError.notConfigured {
+                let message = "Tinyfish is wired in, but I do not have a local Tinyfish API key configured yet."
+                activeAgentRunState = .failedWithError(message)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .blocked,
+                    currentStepIndex: 0,
+                    resultSummary: message
+                )
+                speakWithPreferredVoice(message)
+                voiceState = .responding
+            } catch {
+                let message = "Tinyfish web task failed: \(error.localizedDescription)"
+                activeAgentRunState = .failedWithError(message)
+                superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                    for: missionPlan,
+                    status: .failed,
+                    currentStepIndex: max(missionPlan.steps.count - 1, 0),
+                    resultSummary: message
+                )
+                superAppMissionControl.record(
+                    plan: missionPlan,
+                    status: .failed,
+                    resultSummary: message
+                )
+                IpopAnalytics.trackResponseError(error: message)
+                speakWithPreferredVoice(message)
+                voiceState = .responding
+            }
+
+            if !Task.isCancelled {
+                if case .awaitingUserConfirmation = activeAgentRunState {
+                    // Keep the dashboard visible so the user can see why iPOP stopped.
+                } else {
+                    activeSuperAppPlan = nil
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+                }
+            }
+        }
+    }
+
+    private func updateSuperAppDashboard(for runState: AgentRunState) {
+        guard let plan = activeSuperAppPlan else { return }
+
+        switch runState {
+        case .idle:
+            return
+        case .classifyingRequest, .capturingScreenshot:
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: plan,
+                status: .executing,
+                currentStepIndex: 0
+            )
+        case .waitingForClaude:
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: plan,
+                status: .executing,
+                currentStepIndex: min(1, max(plan.steps.count - 1, 0))
+            )
+        case .executingToolUse(let toolName):
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: plan,
+                status: .executing,
+                currentStepIndex: min(2, max(plan.steps.count - 1, 0)),
+                resultSummary: "Executing \(toolName)."
+            )
+        case .awaitingUserConfirmation(_, let humanReadableSummary):
+            let confirmationStepIndex = plan.steps.firstIndex(where: { $0.needsUserConfirmation })
+                ?? max(plan.steps.count - 2, 0)
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: plan,
+                status: .needsConfirmation,
+                currentStepIndex: confirmationStepIndex,
+                resultSummary: humanReadableSummary
+            )
+        case .finishedWithText(let text):
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: plan,
+                status: .done,
+                currentStepIndex: max(plan.steps.count - 1, 0),
+                resultSummary: text
+            )
+        case .failedWithError(let message):
+            superAppDashboardSnapshot = superAppMissionControl.dashboardSnapshot(
+                for: plan,
+                status: .failed,
+                currentStepIndex: max(plan.steps.count - 1, 0),
+                resultSummary: message
+            )
+        }
+    }
+
+    private func applyPointing(
+        _ parseResult: PointingParseResult,
+        screenCaptures: [CompanionScreenCapture],
+        logPrefix: String
+    ) {
+        if parseResult.coordinate != nil {
+            voiceState = .idle
+        }
+
+        let targetScreenCapture: CompanionScreenCapture? = {
+            if let screenNumber = parseResult.screenNumber,
+               screenNumber >= 1 && screenNumber <= screenCaptures.count {
+                return screenCaptures[screenNumber - 1]
+            }
+            return screenCaptures.first(where: { $0.isCursorScreen })
+        }()
+
+        if let pointCoordinate = parseResult.coordinate,
+           let targetScreenCapture {
+            let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
+            let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
+            let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
+            let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
+            let displayFrame = targetScreenCapture.displayFrame
+
+            let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+            let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+            let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+            let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+            let appKitY = displayHeight - displayLocalY
+            let globalLocation = CGPoint(
+                x: displayLocalX + displayFrame.origin.x,
+                y: appKitY + displayFrame.origin.y
+            )
+
+            detectedElementScreenLocation = globalLocation
+            detectedElementDisplayFrame = displayFrame
+            IpopAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
+            print("🎯 \(logPrefix): (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) -> \"\(parseResult.elementLabel ?? "element")\"")
+        } else {
+            print("🎯 \(logPrefix): \(parseResult.elementLabel ?? "no element")")
+        }
+    }
+
+    private static func milliseconds(since startDate: Date) -> Int {
+        Int(Date().timeIntervalSince(startDate) * 1_000)
+    }
+
+    private static func shouldRouteToComputerUseAgent(_ transcript: String) -> Bool {
+        var normalized = transcript
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let leadingFillers = [
+            "and, ", "and ", "um, ", "um ", "uh, ", "uh ",
+            "so, ", "so ", "ipop, ", "ipop "
+        ]
+        var didStrip = true
+        while didStrip {
+            didStrip = false
+            for filler in leadingFillers where normalized.hasPrefix(filler) {
+                normalized = String(normalized.dropFirst(filler.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                didStrip = true
+            }
+        }
+
+        let magicModeSignals = [
+            "make this better",
+            "make it better",
+            "make this happen",
+            "make it happen",
+            "debug this",
+            "fix this",
+            "ship this",
+            "apply to this",
+            "apply for this",
+            "draft this",
+            "draft a reply",
+            "summarize this page",
+            "summarize this pdf",
+            "summarize this call",
+            "clean this mess",
+            "clean this folder",
+            "turn this into",
+            "use this page",
+            "watch this",
+            "follow up",
+            "keep checking",
+            "take care of this",
+            "handle this",
+            "do this for me",
+            "complete this",
+            "finish this"
+        ]
+        if magicModeSignals.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        let outcomeMissionSignals = [
+            "upwork",
+            "make money",
+            "real money",
+            "earn money",
+            "earn income",
+            "find clients",
+            "find me clients",
+            "find work",
+            "find jobs",
+            "job pipeline",
+            "proposal",
+            "send proposals",
+            "apply to jobs",
+            "apply for jobs",
+            "long term",
+            "long-term",
+            "agentic task",
+            "background task",
+            "keep doing",
+            "keep working",
+            "monitor this",
+            "automate this"
+        ]
+        if outcomeMissionSignals.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        let questionStarters = [
+            "what ", "what's ", "whats ", "why ", "how ", "explain ",
+            "who ", "when ", "where ", "is ", "are ", "do ", "does ",
+            "did ", "can you explain", "could you explain"
+        ]
+        if questionStarters.contains(where: { normalized.hasPrefix($0) }) {
+            return false
+        }
+
+        let macControlSignals = [
+            "use ", "click ", "drag ", "move ", "resize ", "select ",
+            "fill ", "submit ", "send ", "download ", "upload ",
+            "search ", "find ", "navigate ", "organize ", "rename ",
+            "configure ", "change ", "set ", "install ", "uninstall ",
+            "open ", "close ", "quit ", "type ", "press ", "scroll ",
+            "draft ", "summarize ", "watch ", "monitor ",
+            "research ", "compare ", "extract ", "scrape ",
+            "in safari", "in chrome", "in finder", "in xcode",
+            "on my mac", "on the screen", "this window", "the window"
+        ]
+        return macControlSignals.contains { normalized.contains($0) }
     }
 
     /// If the cursor is in transient mode (user toggled "Show cursor" off),
@@ -1309,8 +2494,10 @@ final class CompanionManager: ObservableObject {
             forTimes: [NSValue(time: demoTriggerTime)],
             queue: .main
         ) { [weak self] in
-            IpopAnalytics.trackOnboardingDemoTriggered()
-            self?.performOnboardingDemoInteraction()
+            Task { @MainActor [weak self] in
+                IpopAnalytics.trackOnboardingDemoTriggered()
+                self?.performOnboardingDemoInteraction()
+            }
         }
 
         // Fade out and clean up when the video finishes
@@ -1319,21 +2506,21 @@ final class CompanionManager: ObservableObject {
             object: player.currentItem,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            IpopAnalytics.trackOnboardingVideoCompleted()
-            self.onboardingVideoOpacity = 0.0
-            // Wait for the 2s fade-out animation to complete before tearing down
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                IpopAnalytics.trackOnboardingVideoCompleted()
+                self.onboardingVideoOpacity = 0.0
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 self.tearDownOnboardingVideo()
-                // After the video disappears, stream in the prompt to try talking
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.startOnboardingPromptStream()
-                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                self.startOnboardingPromptStream()
             }
         }
     }
 
     func tearDownOnboardingVideo() {
+        onboardingPromptStreamTask?.cancel()
+        onboardingPromptStreamTask = nil
         showOnboardingVideo = false
         if let timeObserver = onboardingDemoTimeObserver {
             onboardingVideoPlayer?.removeTimeObserver(timeObserver)
@@ -1349,6 +2536,7 @@ final class CompanionManager: ObservableObject {
 
     private func startOnboardingPromptStream() {
         let message = "press control + option and introduce yourself"
+        onboardingPromptStreamTask?.cancel()
         onboardingPromptText = ""
         showOnboardingPrompt = true
         onboardingPromptOpacity = 0.0
@@ -1357,26 +2545,29 @@ final class CompanionManager: ObservableObject {
             onboardingPromptOpacity = 1.0
         }
 
-        var currentIndex = 0
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
-            guard currentIndex < message.count else {
-                timer.invalidate()
-                // Auto-dismiss after 10 seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
-                    guard self.showOnboardingPrompt else { return }
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        self.onboardingPromptOpacity = 0.0
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        self.showOnboardingPrompt = false
-                        self.onboardingPromptText = ""
-                    }
-                }
+        onboardingPromptStreamTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            for character in message {
+                guard !Task.isCancelled else { return }
+                self.onboardingPromptText.append(character)
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled, self.showOnboardingPrompt else {
                 return
             }
-            let index = message.index(message.startIndex, offsetBy: currentIndex)
-            self.onboardingPromptText.append(message[index])
-            currentIndex += 1
+
+            withAnimation(.easeOut(duration: 0.3)) {
+                self.onboardingPromptOpacity = 0.0
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+
+            self.showOnboardingPrompt = false
+            self.onboardingPromptText = ""
+            self.onboardingPromptStreamTask = nil
         }
     }
 

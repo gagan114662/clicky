@@ -270,6 +270,20 @@ final class CodexCLIClient {
             return true
         }
 
+        // Keep native app workflows out of Codex unless the user explicitly
+        // asked for an agent above. A broad "create a ..." trigger should
+        // not turn Calendar/Mail/Slack/Notes/Upwork tasks into source-code
+        // agents with local filesystem privileges.
+        if looksLikeNativeAppWorkflow(lower) {
+            return false
+        }
+
+        if lower.hasPrefix("fix this xcode")
+            || lower.hasPrefix("fix this error in xcode")
+            || (lower.hasPrefix("fix this") && lower.contains("project") && lower.contains("rerun")) {
+            return true
+        }
+
         // Rules 2 & 3 — explicit invocations and action prefixes.
         let agentTriggers = [
             "codex ",
@@ -288,6 +302,17 @@ final class CodexCLIClient {
             "launch a codex",
         ]
         return agentTriggers.contains { lower.hasPrefix($0) }
+    }
+
+    private static func looksLikeNativeAppWorkflow(_ lower: String) -> Bool {
+        let nativeWorkflowMarkers = [
+            "calendar", "meeting", "invite",
+            "mail", "email", "send message", "draft message", "dm ", "slack",
+            "notes app", "take a note", "make a note", "create a note", "note called",
+            "upwork", "apply to", "apply with",
+            "payment", "pay ", "purchase",
+        ]
+        return nativeWorkflowMarkers.contains { lower.contains($0) }
     }
 
     /// Splits a transcript into N parallel task strings when the user explicitly

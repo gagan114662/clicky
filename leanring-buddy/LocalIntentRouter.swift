@@ -28,6 +28,12 @@ enum LocalIntent: Equatable {
     case launchOrActivateApp(name: String)
     /// Send a graceful Quit to the named app.
     case quitApp(name: String)
+    /// Close the frontmost window without quitting the app.
+    case closeFrontmostWindow
+    /// Activate the named app, then close its frontmost window without quitting it.
+    case closeWindowInApp(name: String)
+    /// Open Calculator and enter a simple arithmetic expression.
+    case calculateInCalculator(expression: String)
     /// Create a new Apple Notes note with the given text.
     case createNote(text: String)
     /// Click any element in the frontmost app's accessibility tree whose
@@ -74,8 +80,24 @@ enum LocalIntentRouter {
             return .currentTime
         }
 
-        if let noteText = parseCreateNoteCommand(normalized) {
-            return .createNote(text: preserveOriginalCasing(of: noteText, from: transcript))
+        if let calculatorExpression = parseCalculatorExpressionCommand(normalized) {
+            return .calculateInCalculator(expression: calculatorExpression)
+        }
+
+        if let targetAppName = parseCloseWindowInAppCommand(normalized) {
+            return .closeWindowInApp(name: targetAppName)
+        }
+
+        if isCloseFrontmostWindowCommand(normalized) {
+            return .closeFrontmostWindow
+        }
+
+        if parseCreateNoteCommand(normalized) != nil {
+            // Creating or editing Apple Notes persists user content. Keep
+            // the deterministic router out of this path so the super-app /
+            // agent confirmation layer can preview the note instead of
+            // silently writing it.
+            return .unmatched
         }
 
         // "navigate to <X>" / "go to the <X> icon" / "show me the <X> menu"
@@ -141,12 +163,77 @@ enum LocalIntentRouter {
                 }
             case .quit, .close, .exit:
                 if !remainder.isEmpty {
+                    if verb == .close, let targetAppName = parseCloseWindowRemainder(remainder) {
+                        return .closeWindowInApp(name: targetAppName)
+                    }
                     return .quitApp(name: remainder)
                 }
             }
         }
 
         return .unmatched
+    }
+
+    private static func isCloseFrontmostWindowCommand(_ normalized: String) -> Bool {
+        let closePhrases = [
+            "close this window",
+            "close the window",
+            "close current window",
+            "close front window",
+            "close active window"
+        ]
+        if closePhrases.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        let words = Set(normalized.split(separator: " ").map(String.init))
+        return words.contains("close")
+            && words.contains("window")
+            && (words.contains("this") || words.contains("current") || words.contains("active") || words.contains("frontmost"))
+    }
+
+    private static func parseCloseWindowInAppCommand(_ normalized: String) -> String? {
+        guard normalized.hasPrefix("close "), normalized.contains("window") else {
+            return nil
+        }
+
+        return parseCloseWindowRemainder(String(normalized.dropFirst("close ".count)))
+    }
+
+    private static func parseCloseWindowRemainder(_ remainder: String) -> String? {
+        var candidate = remainder
+        candidate = stripDeterminerPrefix(candidate)
+        candidate = stripLeadingWindowQualifier(candidate)
+
+        if candidate.hasPrefix("window in ") {
+            candidate = String(candidate.dropFirst("window in ".count))
+        } else if candidate.hasPrefix("window for ") {
+            candidate = String(candidate.dropFirst("window for ".count))
+        } else if candidate.hasPrefix("window of ") {
+            candidate = String(candidate.dropFirst("window of ".count))
+        } else if candidate.hasSuffix(" window") {
+            candidate = String(candidate.dropLast(" window".count))
+        } else {
+            return nil
+        }
+
+        candidate = stripTrailingFillerAndPunctuation(stripDeterminerPrefix(candidate))
+        let untargetedNames: Set<String> = ["", "window", "this", "current", "active", "front", "frontmost"]
+        return untargetedNames.contains(candidate) ? nil : candidate
+    }
+
+    private static func stripLeadingWindowQualifier(_ text: String) -> String {
+        var cleaned = text
+        let prefixes = ["this ", "that ", "current ", "active ", "frontmost ", "front "]
+        var didStrip = true
+        while didStrip {
+            didStrip = false
+            for prefix in prefixes where cleaned.hasPrefix(prefix) {
+                cleaned = String(cleaned.dropFirst(prefix.count))
+                didStrip = true
+            }
+        }
+        return cleaned
     }
 
     // MARK: - Verb table
@@ -274,6 +361,9 @@ enum LocalIntentRouter {
         }
 
         guard let verb = detectedVerb, let verbIndex = verbWordIndex else { return nil }
+        if verb == .quit && words.contains(where: { $0.lowercased() == "window" }) {
+            return nil
+        }
 
         // Words AFTER the verb are the app name, unless the verb is at the
         // very end (e.g. "freeform open") in which case the words BEFORE
@@ -318,6 +408,89 @@ enum LocalIntentRouter {
         case quit
     }
 
+    // MARK: - Calculator matching
+
+    private static func parseCalculatorExpressionCommand(_ text: String) -> String? {
+        guard text.contains("calculator")
+            || text.hasPrefix("calculate ")
+            || text.hasPrefix("what is ")
+            || text.hasPrefix("what's ") else {
+            return nil
+        }
+
+        let triggerPhrases = [
+            "show me ",
+            "calculate ",
+            "what is ",
+            "what's ",
+            "work out ",
+            "compute ",
+        ]
+        var candidates: [String] = []
+        for phrase in triggerPhrases {
+            if let range = text.range(of: phrase) {
+                candidates.append(String(text[range.upperBound...]))
+            }
+        }
+
+        // "open calculator 17 times 24" is less natural, but cheap to support.
+        if let range = text.range(of: "calculator ") {
+            candidates.append(String(text[range.upperBound...]))
+        }
+
+        for candidate in candidates {
+            if let expression = normalizeCalculatorExpression(candidate) {
+                return expression
+            }
+        }
+        return nil
+    }
+
+    private static func normalizeCalculatorExpression(_ text: String) -> String? {
+        var candidate = text
+            .replacingOccurrences(of: "multiplied by", with: "*")
+            .replacingOccurrences(of: "times", with: "*")
+            .replacingOccurrences(of: "x", with: "*")
+            .replacingOccurrences(of: "plus", with: "+")
+            .replacingOccurrences(of: "minus", with: "-")
+            .replacingOccurrences(of: "divided by", with: "/")
+            .replacingOccurrences(of: "divide by", with: "/")
+            .replacingOccurrences(of: "over", with: "/")
+            .replacingOccurrences(of: "÷", with: "/")
+            .replacingOccurrences(of: "×", with: "*")
+
+        let trailingPhrases = [
+            " in calculator", " on calculator", " using calculator",
+            " in the calculator", " on the calculator", " with calculator",
+            " please", " for me", " on screen", " on the screen",
+        ]
+        var changed = true
+        while changed {
+            changed = false
+            for phrase in trailingPhrases where candidate.hasSuffix(phrase) {
+                candidate = String(candidate.dropLast(phrase.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                changed = true
+                break
+            }
+        }
+
+        candidate = candidate.replacingOccurrences(of: ",", with: "")
+        let pattern = #"(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+        guard let match = regex.firstMatch(in: candidate, range: range),
+              match.numberOfRanges == 4,
+              let leftRange = Range(match.range(at: 1), in: candidate),
+              let opRange = Range(match.range(at: 2), in: candidate),
+              let rightRange = Range(match.range(at: 3), in: candidate)
+        else {
+            return nil
+        }
+
+        return "\(candidate[leftRange])\(candidate[opRange])\(candidate[rightRange])"
+    }
+
     /// Recognizes "navigate to <X>", "go to the <X> icon", "show me the <X>
     /// menu" and similar phrasings, returning the bare element name. These
     /// are CLICK intents (not app launches) because the user is referring
@@ -356,8 +529,12 @@ enum LocalIntentRouter {
     /// for Claude to emit OPEN_APP/KEY/TYPE tags.
     private static func parseCreateNoteCommand(_ text: String) -> String? {
         let patterns = [
-            #"(?:^|\b)(?:make|create|write|take|add)\s+(?:a\s+)?note(?:\s+for\s+me)?(?:\s+(?:to|that\s+says|saying|about|of))?\s+(.+)$"#,
-            #"(?:^|\b)(?:notes?|notes\s+app)\s+(?:and\s+)?(?:make|create|write|take|add)\s+(?:a\s+)?note(?:\s+for\s+me)?(?:\s+(?:to|that\s+says|saying|about|of))?\s+(.+)$"#,
+            #"(?:^|\b)(?:make|create|write|take|add|draft|jot(?:\s+down)?)\s+(?:a\s+)?note(?:\s+for\s+me)?(?:\s+(?:to|that\s+says|saying|about|of|called|titled))?\s+(.+)$"#,
+            #"(?:^|\b)(?:jot\s+down)\s+(?:that\s+)?(.+)$"#,
+            #"(?:^|\b)(?:note\s+down)\s+(?:that\s+)?(.+)$"#,
+            #"(?:^|\b)(?:notes?|notes\s+app)\s+(?:and\s+)?(?:make|create|write|take|add|draft|jot(?:\s+down)?)\s+(?:a\s+)?note(?:\s+for\s+me)?(?:\s+(?:to|that\s+says|saying|about|of|called|titled))?\s+(.+)$"#,
+            #"(?:^|\b)(?:notes?|notes\s+app)\s+(?:and\s+)?(?:jot\s+down)\s+(?:that\s+)?(.+)$"#,
+            #"(?:^|\b)(?:notes?|notes\s+app)\s+(?:and\s+)?(?:note\s+down)\s+(?:that\s+)?(.+)$"#,
         ]
 
         for pattern in patterns {
