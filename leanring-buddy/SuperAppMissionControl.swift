@@ -851,7 +851,10 @@ enum UpworkOpportunityRanker {
                 "publish on your app store", "publish on your developer account",
                 "transfer the app to my account", "transfer to my account",
                 "sms activation", "temporary number", "temporary phone",
-                "verification code", "otp"
+                "verification code", "otp", "all costs are on you",
+                "all costs on you", "balance top-up", "top-up for testing",
+                "must have at least 1 published app", "link to your app store developer account",
+                "link to your google play developer account"
             ]
         }
         let detectedRedFlags = redFlagSignals.filter { searchableText.contains($0) }

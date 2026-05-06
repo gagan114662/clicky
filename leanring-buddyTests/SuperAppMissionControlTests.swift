@@ -552,7 +552,7 @@ final class SuperAppMissionControlTests: XCTestCase {
             clientSummary: "Payment verified, 4.7 rating, spent $20k, less than 5 proposals",
             budgetText: "Hourly",
             skills: ["Swift", "iOS"],
-            descriptionSnippet: "Open-source Swift base is available. Build an SMS activation temporary number app, publish on your App Store developer account, then transfer the app to my account.",
+            descriptionSnippet: "Open-source Swift base is available. Build an SMS activation temporary number app, all costs are on you including balance top-up for testing, publish on your App Store developer account, include a link to your App Store developer account, then transfer the app to my account.",
             postedTimeText: "Posted 2 months ago",
             connectsText: "8 connects"
         )
