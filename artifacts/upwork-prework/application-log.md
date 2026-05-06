@@ -2,6 +2,21 @@
 
 ## 2026-05-05
 
+### Live Screening Pass - GitHub SwiftUI Search / No New Submission
+
+- Time: 2026-05-05 20:58 EDT
+- Search checked: `"github" SwiftUI bug fix`, filtered to less than 5 proposals, payment verified, most recent.
+- Skipped leads:
+  - `SwiftUI iOS Developer Needed for Animated Gamified Onboarding and Bee Logic`: `$30` fixed budget for broad production UI/animation/state work, not a fast paid diagnostic/fix.
+  - `iOS Voice + Whiteboard App - Bug Fix on Existing Build`: already applied earlier.
+  - `App Store Connect New Analytics Dashboard Help`: explicit 25-minute Zoom call.
+  - `Upload and Publish iOS App`: asks freelancer to use a paid Apple Developer Program account.
+  - `Urgent: Apple Developer Account Activation Needed`: account activation/billing-risk work.
+  - `Build & Publish iOS App for SMS Verification (Open-Source Swift Base Available)`: inspected because it mentioned an open-source Swift base, then skipped because it involves SMS activation/temporary-number work, publishing on the freelancer's App Store developer account, and transferring the app afterward.
+- Product fix completed: Fast Cash ranker now flags App Store developer-account publishing, app transfer, SMS activation, temporary-number, verification-code, and OTP phrasing as account-risk work; test coverage added.
+- Current outcome: No new proposal submitted; no earnings yet.
+- Proof artifact: `live-screening-2026-05-05-2058.md`
+
 ### Live Screening Pass - No Money Proof / No New Submission
 
 - Time: 2026-05-05 20:54 EDT

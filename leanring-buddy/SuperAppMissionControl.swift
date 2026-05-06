@@ -846,7 +846,12 @@ enum UpworkOpportunityRanker {
                 "repo shared after hire", "repository shared after hire",
                 "shared after hire", "shared after hiring",
                 "code shared after hire", "code will be shared after hiring",
-                "access after hire", "access after hiring"
+                "access after hire", "access after hiring",
+                "your app store developer account", "your apple developer account",
+                "publish on your app store", "publish on your developer account",
+                "transfer the app to my account", "transfer to my account",
+                "sms activation", "temporary number", "temporary phone",
+                "verification code", "otp"
             ]
         }
         let detectedRedFlags = redFlagSignals.filter { searchableText.contains($0) }

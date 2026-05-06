@@ -545,6 +545,36 @@ final class SuperAppMissionControlTests: XCTestCase {
         XCTAssertTrue(callScore.reasons.contains(where: { $0.contains("zero-human-intervention") }))
     }
 
+    func testFastCashRankerRejectsAppleAccountPublishingAndSmsActivationWork() {
+        let riskyPublishingJob = UpworkOpportunityCandidate(
+            id: "account-publish",
+            title: "Build and publish iOS app for SMS verification",
+            clientSummary: "Payment verified, 4.7 rating, spent $20k, less than 5 proposals",
+            budgetText: "Hourly",
+            skills: ["Swift", "iOS"],
+            descriptionSnippet: "Open-source Swift base is available. Build an SMS activation temporary number app, publish on your App Store developer account, then transfer the app to my account.",
+            postedTimeText: "Posted 2 months ago",
+            connectsText: "8 connects"
+        )
+        let asyncArtifactJob = UpworkOpportunityCandidate(
+            id: "async-artifact",
+            title: "Patch public SwiftUI bug from GitHub issue",
+            clientSummary: "Payment verified, 5.0 rating, spent $9k, less than 5 proposals",
+            budgetText: "$150 fixed-price",
+            skills: ["Swift", "SwiftUI", "iOS"],
+            descriptionSnippet: "Public GitHub issue includes repro steps, logs, screenshots, and a failing SwiftUI view state. Async diagnostic and patch only.",
+            postedTimeText: "Posted 20 minutes ago",
+            connectsText: "8 connects"
+        )
+
+        let ranked = UpworkOpportunityRanker.rank([riskyPublishingJob, asyncArtifactJob], mode: .fastCash)
+        let riskyPublishingScore = UpworkOpportunityRanker.score(riskyPublishingJob, mode: .fastCash)
+
+        XCTAssertEqual(ranked.first?.candidate.id, "async-artifact")
+        XCTAssertGreaterThanOrEqual(riskyPublishingScore.riskPenalty, 20)
+        XCTAssertTrue(riskyPublishingScore.reasons.contains(where: { $0.contains("Risk penalty") }))
+    }
+
     func testUpworkProposalDraftIsSpecificAndNeverSubmits() {
         let candidate = UpworkOpportunityCandidate(
             id: "native-app",
