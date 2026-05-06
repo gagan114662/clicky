@@ -515,6 +515,36 @@ final class SuperAppMissionControlTests: XCTestCase {
         XCTAssertTrue(noArtifactScore.reasons.contains(where: { $0.contains("No upfront code") }))
     }
 
+    func testFastCashRankerRejectsCallsAndPostHireAccessOnlyJobs() {
+        let callJob = UpworkOpportunityCandidate(
+            id: "call",
+            title: "Urgent Xcode build issue walkthrough",
+            clientSummary: "Payment verified, 5.0 rating, spent $12k, less than 5 proposals",
+            budgetText: "$150 fixed-price",
+            skills: ["Swift", "Xcode"],
+            descriptionSnippet: "Need a Zoom call and live troubleshooting session. Repository access will be shared after hiring.",
+            postedTimeText: "Posted 12 minutes ago",
+            connectsText: "8 connects"
+        )
+        let asyncArtifactJob = UpworkOpportunityCandidate(
+            id: "async-proof",
+            title: "Fix Xcode compile error from public repo logs",
+            clientSummary: "Payment verified, 5.0 rating, spent $8k, less than 5 proposals",
+            budgetText: "$125 fixed-price",
+            skills: ["Swift", "SwiftUI", "Xcode"],
+            descriptionSnippet: "Public GitHub repo, attached logs, exact error message, and repro steps are included. Async patch handoff only.",
+            postedTimeText: "Posted 18 minutes ago",
+            connectsText: "8 connects"
+        )
+
+        let ranked = UpworkOpportunityRanker.rank([callJob, asyncArtifactJob], mode: .fastCash)
+        let callScore = UpworkOpportunityRanker.score(callJob, mode: .fastCash)
+
+        XCTAssertEqual(ranked.first?.candidate.id, "async-proof")
+        XCTAssertGreaterThanOrEqual(callScore.riskPenalty, 20)
+        XCTAssertTrue(callScore.reasons.contains(where: { $0.contains("zero-human-intervention") }))
+    }
+
     func testUpworkProposalDraftIsSpecificAndNeverSubmits() {
         let candidate = UpworkOpportunityCandidate(
             id: "native-app",
@@ -559,6 +589,7 @@ final class SuperAppMissionControlTests: XCTestCase {
         XCTAssertTrue(draft.body.lowercased().contains("proof-first"))
         XCTAssertTrue(draft.body.lowercased().contains("funded in upwork"))
         XCTAssertTrue(draft.body.lowercased().contains("pre-application proof artifact"))
+        XCTAssertTrue(draft.body.contains("No Zoom call is needed"))
         XCTAssertTrue(draft.body.contains("small fixed-price diagnostic/fix milestone"))
         XCTAssertEqual(draft.questions.count, 1)
         XCTAssertTrue(draft.questions.first?.contains("Xcode project/repo") == true)
@@ -624,6 +655,20 @@ final class SuperAppMissionControlTests: XCTestCase {
 
         XCTAssertTrue(scoreboard.contains(where: { $0.id == "offers" && $0.value == "2" }))
         XCTAssertTrue(scoreboard.contains(where: { $0.id == "dollarsWon" && $0.value == "1 paid" }))
+    }
+
+    func testFastCashMissionSurfacesMoneyProofAndBlockersInDashboard() {
+        let missionControl = makeMissionControl()
+
+        let plan = missionControl.plan(
+            for: "Find the fastest Upwork money with Fast Cash mode on Upwork; submit proposals under my full approval."
+        )
+
+        XCTAssertTrue(plan.outcomeMetrics.contains(where: { $0.id == "moneyProof" }))
+        XCTAssertTrue(plan.outcomeMetrics.contains(where: { $0.id == "blockers" }))
+        XCTAssertTrue(plan.proofLog.prefix(4).contains(where: { $0.id == "earnings-proof" }))
+        XCTAssertTrue(plan.approvalChips.contains(where: { $0.id == "calls-meetings" && $0.isBlocking }))
+        XCTAssertTrue(plan.approvalChips.contains(where: { $0.id == "upfront-artifacts" && $0.isBlocking }))
     }
 
     func testDashboardCarriesFullMissionProgress() {

@@ -1173,8 +1173,15 @@ private struct SuperAppDashboardPanelView: View {
     }
 
     private var outcomeMetricsView: some View {
-        HStack(spacing: 6) {
-            ForEach(snapshot.outcomeMetrics.prefix(3)) { metric in
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(minimum: 78), spacing: 6),
+                GridItem(.flexible(minimum: 78), spacing: 6)
+            ],
+            alignment: .leading,
+            spacing: 6
+        ) {
+            ForEach(snapshot.outcomeMetrics.prefix(6)) { metric in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(metric.label)
                         .font(.system(size: 8.5, weight: .semibold))
@@ -1229,7 +1236,7 @@ private struct SuperAppDashboardPanelView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(DS.Colors.textTertiary)
 
-            ForEach(snapshot.proofLog.prefix(4)) { entry in
+            ForEach(snapshot.proofLog.prefix(6)) { entry in
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: proofIconName(for: entry.status))
                         .font(.system(size: 9, weight: .semibold))
@@ -1259,7 +1266,7 @@ private struct SuperAppDashboardPanelView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(DS.Colors.textTertiary)
 
-            ForEach(snapshot.approvalChips.prefix(3)) { chip in
+            ForEach(snapshot.approvalChips.prefix(5)) { chip in
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: approvalIconName(for: chip))
                         .font(.system(size: 9, weight: .semibold))

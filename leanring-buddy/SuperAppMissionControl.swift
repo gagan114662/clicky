@@ -664,6 +664,9 @@ enum UpworkOpportunityRanker {
         if mode == .fastCash && upfrontArtifacts == 0 {
             reasons.append("No upfront code, logs, screenshots, or public repro; skip standing-submit unless the user manually chooses a paid-access ask.")
         }
+        if mode == .fastCash && containsCallOrMeetingOnlySignal(searchableText) {
+            reasons.append("Requires calls or live walkthroughs; reject for zero-human-intervention Fast Cash.")
+        }
         if riskPenalty >= 10 {
             reasons.append("Risk penalty applied before drafting.")
         }
@@ -835,8 +838,15 @@ enum UpworkOpportunityRanker {
                 "zoom", "video call", "phone call", "quick call", "call with",
                 "hop on a call", "live session", "screen share", "screen-share",
                 "walk me through", "consulting call", "consultation call", "meeting",
+                "client call", "requires call", "call required", "requires meeting",
+                "meeting required", "training session", "teach me", "walkthrough",
+                "live troubleshooting", "pair programming", "interview required",
                 "use your apple developer account", "apple developer account activation",
-                "upload using your account", "buy connects", "boost proposal"
+                "upload using your account", "buy connects", "boost proposal",
+                "repo shared after hire", "repository shared after hire",
+                "shared after hire", "shared after hiring",
+                "code shared after hire", "code will be shared after hiring",
+                "access after hire", "access after hiring"
             ]
         }
         let detectedRedFlags = redFlagSignals.filter { searchableText.contains($0) }
@@ -851,7 +861,10 @@ enum UpworkOpportunityRanker {
         [
             "zoom", "video call", "phone call", "quick call", "call with",
             "hop on a call", "live session", "screen share", "screen-share",
-            "walk me through", "consulting call", "consultation call", "meeting"
+            "walk me through", "consulting call", "consultation call", "meeting",
+            "client call", "requires call", "call required", "requires meeting",
+            "meeting required", "training session", "teach me", "walkthrough",
+            "live troubleshooting", "pair programming", "interview required"
         ].contains { searchableText.contains($0) }
     }
 }
@@ -893,7 +906,7 @@ enum UpworkProposalDraftFactory {
 
             I can do this asynchronously, and I will only submit this after producing a pre-application proof artifact from the visible material in your post: logs, screenshots, repro steps, public URL, code snippet, or repo link. The fastest path is proof-first: reproduce from that artifact, identify the smallest safe fix, and send a short technical handoff.
 
-            For a quick start, I would suggest a small fixed-price diagnostic/fix milestone in the $50-$250 range. Once that milestone is funded in Upwork, I will deliver the patch or private-repo work there with the proof attached.
+            No Zoom call is needed from my side. For a quick start, I would suggest a small fixed-price diagnostic/fix milestone in the $50-$250 range. Once that milestone is funded in Upwork, I will deliver the patch or private-repo work there with the proof attached.
 
             One question before I start: do you already have the Xcode project/repo available, or should I work from screenshots/logs first?
             """
@@ -1265,8 +1278,9 @@ enum UpworkMissionWorkflow {
                 SuperAppOutcomeMetric(id: "target", label: "Target", value: "$50-$250", isPrimary: true),
                 SuperAppOutcomeMetric(id: "proofFirst", label: "Proof", value: "Prework first", isPrimary: true),
                 SuperAppOutcomeMetric(id: "limit", label: "Submit cap", value: "\(fastCashApplicationLimit)", isPrimary: false),
+                SuperAppOutcomeMetric(id: "moneyProof", label: "Money proof", value: "Contract / paid", isPrimary: false),
                 SuperAppOutcomeMetric(id: "submitted", label: "Submitted", value: standingSubmissionApproval ? "Track" : "0", isPrimary: standingSubmissionApproval),
-                SuperAppOutcomeMetric(id: "moneyProof", label: "Money proof", value: "Contract / paid", isPrimary: false)
+                SuperAppOutcomeMetric(id: "blockers", label: "Blockers", value: "Calls / no proof", isPrimary: false)
             ]
         }
 
@@ -1334,6 +1348,12 @@ enum UpworkMissionWorkflow {
                     status: .planned
                 ),
                 SuperAppProofLogEntry(
+                    id: "earnings-proof",
+                    title: "Earnings proof",
+                    detail: "Offer, contract page, funded/approved milestone, active hourly contract, paid consultation, or clearing/available earnings.",
+                    status: .planned
+                ),
+                SuperAppProofLogEntry(
                     id: "proof-first-preview",
                     title: "Pre-application proof",
                     detail: "Real diagnostic preview, reproduction checklist, likely failure mode, tiny demo artifact, or code review note created from visible public material before applying.",
@@ -1355,12 +1375,6 @@ enum UpworkMissionWorkflow {
                     id: "submission-receipts",
                     title: "Submission receipts",
                     detail: "For standing approval: at most \(fastCashApplicationLimit) async preworked application receipts with connects spent and visible status proof.",
-                    status: .planned
-                ),
-                SuperAppProofLogEntry(
-                    id: "earnings-proof",
-                    title: "Earnings proof",
-                    detail: "Offer, contract page, funded/approved milestone, active hourly contract, paid consultation, or clearing/available earnings.",
                     status: .planned
                 )
             ]
